@@ -2,6 +2,7 @@
   "name": "worship-presenter",
   "version": "0.1.0",
   "description": "Offline Windows worship lyrics presenter",
+  "author": "Tyler Bland",
   "main": "main.js",
   "type": "commonjs",
   "scripts": {
