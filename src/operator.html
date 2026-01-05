@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Worship Presenter</title>
+    <link rel="stylesheet" href="operator.css" />
+    <link rel="stylesheet" href="shared/stage.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="app-header">
+        <div class="brand">
+          <div class="brand-title">Worship Presenter</div>
+          <div class="brand-sub">Offline Slides Studio</div>
+        </div>
+        <div class="header-actions">
+          <span class="badge warning" id="asset-warning" hidden>Missing media</span>
+          <div class="project-path" id="project-path">No project folder</div>
+        </div>
+      </header>
+
+      <div class="presenter-bar presenter-top">
+        <div class="presenter-controls">
+          <button id="hide-program">Hide Program</button>
+          <button id="go-live" class="primary">Go Live</button>
+          <button id="prev-slide">Prev</button>
+          <button id="next-slide">Next</button>
+          <button id="panic" class="panic">Panic</button>
+          <label class="small"><input id="follow-live" type="checkbox" /> Follow Live</label>
+          <label class="small"><input id="auto-go-live" type="checkbox" /> Advance goes live</label>
+        </div>
+        <div class="presenter-controls">
+          <label class="small" for="display-select">Program Display</label>
+          <select id="display-select"></select>
+          <span class="status-pill" id="live-status">Live: -</span>
+        </div>
+      </div>
+
+      <main class="app-body">
+        <section class="panel setlist-panel">
+          <h3>Lineup</h3>
+
+          <div class="lineup-buttons">
+            <button id="select-announcements" type="button">Announcements</button>
+            <button id="select-timer" type="button">Timer</button>
+          </div>
+
+          <div class="section-block">
+            <div class="section-header">
+              <span>Setlist</span>
+              <button id="add-song" type="button">Add Song</button>
+            </div>
+            <ul class="list" id="setlist"></ul>
+            <div class="empty-hint" id="setlist-empty">
+              <div>Add a song to start building the set.</div>
+              <div class="small">Tip: Drag and drop lyric text files to import.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel editor-panel">
+          <h3>Song Editor</h3>
+          <div class="preview-wrap" id="preview-wrap">
+            <div class="preview-card" id="preview-card">
+              <div class="preview-stage" id="preview-stage"></div>
+            </div>
+          </div>
+          <div class="panel-splitter" id="preview-splitter" aria-label="Resize preview" role="separator"></div>
+          <div class="editor-section" id="song-editor">
+            <div class="form-row">
+              <label for="song-title">Song Title</label>
+              <input id="song-title" type="text" placeholder="Amazing Grace" />
+            </div>
+            <div class="editor-grid">
+              <div>
+                <div class="inline-controls slide-actions">
+                  <button id="add-slide">Add Slide</button>
+                  <button id="import-lyrics">Import Lyrics</button>
+                </div>
+                <ul class="list slide-list" id="slides"></ul>
+                <div class="empty-hint" id="slides-empty">Select a song to edit slides.</div>
+              </div>
+              <div class="slide-editor">
+                <div class="slide-header-row">
+                  <div class="form-row slide-label-row">
+                    <label for="slide-label">Slide Label</label>
+                    <input id="slide-label" type="text" placeholder="Slide 1" />
+                  </div>
+                  <div class="toggle-row slide-toggle-row">
+                    <label><input id="show-title" type="checkbox" />Title</label>
+                    <label><input id="show-lyrics" type="checkbox" />Lyrics</label>
+                    <label><input id="show-footer" type="checkbox" />Footer</label>
+                  </div>
+                </div>
+                <div class="form-row" id="title-row">
+                  <label for="title-text">Title Text</label>
+                  <input id="title-text" type="text" placeholder="Song title" />
+                </div>
+                <div class="form-row" id="lyrics-row">
+                  <label for="lyrics-text">Lyrics</label>
+                  <textarea id="lyrics-text" placeholder="Paste lyrics here"></textarea>
+                </div>
+                <div class="form-row" id="footer-row">
+                  <label for="footer-text">
+                    Footer
+                    <span class="small">
+                      <input id="footer-auto" type="checkbox" /> CCLI info
+                    </span>
+                  </label>
+                  <textarea id="footer-text" rows="2" placeholder="CCLI footer"></textarea>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="editor-section" id="announcement-editor" hidden>
+            <div class="media-editor-list">
+              <div class="section-header">
+                <span>Announcements</span>
+                <button id="add-announcement" type="button">Add Slide</button>
+              </div>
+              <ul class="list media-list" id="announcements-preview-list"></ul>
+              <div class="empty-hint" id="announcements-preview-empty">Add announcement slides to show before service.</div>
+            </div>
+          </div>
+
+          <div class="editor-section" id="timer-editor" hidden>
+            <div class="media-editor-list">
+              <div class="section-header">
+                <span>Timer</span>
+                <button id="add-timer-slide" type="button">Add Slide</button>
+              </div>
+              <ul class="list media-list" id="timer-preview-list"></ul>
+              <div class="empty-hint" id="timer-preview-empty">Add timer slides for countdowns or holding screens.</div>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel inspector-panel">
+          <h3>Inspector</h3>
+          <span class="badge" id="song-status">No song selected</span>
+          <div class="empty-hint" id="inspector-empty" hidden>Select a song or slide to edit its settings.</div>
+
+          <div class="inspector-group" id="background-inspector">
+            <div class="form-row">
+              <label>Background</label>
+              <div class="inline-controls">
+                <button id="open-library">Library</button>
+                <button id="upload-background">Upload</button>
+              </div>
+              <div class="small" id="background-path">No background selected</div>
+            </div>
+          </div>
+
+          <div class="inspector-group" id="announcement-inspector" hidden>
+            <div class="form-row">
+              <label>Announcements Library</label>
+              <div class="inline-controls">
+                <button id="open-announcement-library">Library</button>
+                <button id="upload-announcement">Upload</button>
+              </div>
+              <div class="small" id="announcement-path">No announcement selected</div>
+            </div>
+            <div class="form-row form-row-inline">
+              <label class="toggle-inline">
+                <input id="announcement-auto" type="checkbox" />
+                Auto-advance
+              </label>
+            </div>
+            <div class="form-row">
+              <label for="announcement-advance">Auto-advance (sec)</label>
+              <input id="announcement-advance" type="number" min="3" max="120" />
+            </div>
+            <div class="form-row form-row-inline">
+              <label class="toggle-inline">
+                <input id="announcement-loop" type="checkbox" />
+                Loop announcements
+              </label>
+            </div>
+          </div>
+
+          <div class="inspector-group" id="timer-inspector" hidden>
+            <div class="form-row">
+              <label>Timer Media</label>
+              <div class="inline-controls">
+                <button id="open-timer-library">Library</button>
+                <button id="upload-timer-media">Upload</button>
+              </div>
+              <div class="small" id="timer-media-path">No timer media selected</div>
+            </div>
+            <div class="form-row form-row-inline">
+              <label class="toggle-inline">
+                <input id="timer-auto-video" type="checkbox" />
+                Auto-advance on video end
+              </label>
+            </div>
+            <div class="form-row form-row-inline">
+              <label class="toggle-inline">
+                <input id="timer-auto-images" type="checkbox" />
+                Auto-advance images
+              </label>
+            </div>
+            <div class="form-row" id="timer-advance-row">
+              <label for="timer-advance">Image advance (sec)</label>
+              <input id="timer-advance" type="number" min="3" max="120" />
+            </div>
+          </div>
+
+          <div class="inspector-group" id="theme-group">
+            <button class="section-toggle" id="theme-toggle" type="button" aria-expanded="true">
+              <span>Theme</span>
+              <span class="chevron" aria-hidden="true">v</span>
+            </button>
+            <div class="section-body" id="theme-section">
+              <div class="form-row">
+              <label for="theme-target">Text Style</label>
+              <select id="theme-target">
+                <option value="title">Title</option>
+                <option value="lyrics" selected>Lyrics</option>
+                <option value="footer">Footer</option>
+              </select>
+              </div>
+              <div class="form-row">
+              <label for="theme-font">Font Family</label>
+              <select id="theme-font">
+                <option value="Segoe UI">Segoe UI</option>
+                <option value="Bahnschrift">Bahnschrift</option>
+                <option value="Calibri">Calibri</option>
+                <option value="Arial">Arial</option>
+                <option value="Trebuchet MS">Trebuchet MS</option>
+                <option value="Verdana">Verdana</option>
+                <option value="Georgia">Georgia</option>
+                <option value="Times New Roman">Times New Roman</option>
+              </select>
+              </div>
+              <div class="form-row">
+              <div class="field-row theme-layout-row">
+                <div class="field">
+                  <label for="theme-base">Size</label>
+                  <input id="theme-base" type="number" min="20" max="120" />
+                </div>
+                <div class="field">
+                  <label for="theme-color">Color</label>
+                  <input id="theme-color" type="color" class="color-input" />
+                </div>
+                <div class="field">
+                  <label>Position</label>
+                  <div class="position-toggle" id="theme-position">
+                    <button type="button" class="active" data-value="center" aria-pressed="true" aria-label="Top">
+                      <span class="pos-icon pos-center">
+                        <span class="pos-line"></span>
+                        <span class="pos-line"></span>
+                        <span class="pos-line"></span>
+                      </span>
+                    </button>
+                    <button type="button" data-value="lower-third" aria-pressed="false" aria-label="Center">
+                      <span class="pos-icon pos-lower">
+                        <span class="pos-line"></span>
+                        <span class="pos-line"></span>
+                        <span class="pos-line"></span>
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+              </div>
+              <div class="form-row form-row-inline">
+              <label class="small toggle-inline" aria-label="Stroke toggle">
+                <input id="theme-stroke-toggle" type="checkbox" />
+              </label>
+              <span class="row-title">Stroke</span>
+              </div>
+              <div class="option-group" id="stroke-options">
+                <div class="field-row theme-stroke-row">
+                  <div class="field">
+                    <label for="theme-stroke">Width</label>
+                    <input id="theme-stroke" type="number" min="0" max="10" />
+                  </div>
+                  <div class="field">
+                    <label for="theme-stroke-color">Color</label>
+                    <input id="theme-stroke-color" type="color" class="color-input" />
+                  </div>
+                </div>
+              </div>
+              <div class="form-row form-row-inline">
+              <label class="small toggle-inline" aria-label="Shadow toggle">
+                <input id="theme-shadow-toggle" type="checkbox" />
+              </label>
+              <span class="row-title">Shadow</span>
+              </div>
+              <div class="option-group" id="shadow-options">
+                <div class="field-row theme-shadow-row">
+                  <div class="field">
+                    <div class="shadow-grid">
+                      <div class="shadow-field">
+                        <label for="theme-shadow-x">dx</label>
+                        <input id="theme-shadow-x" type="number" min="-20" max="20" />
+                      </div>
+                      <div class="shadow-field">
+                        <label for="theme-shadow-y">dy</label>
+                        <input id="theme-shadow-y" type="number" min="-20" max="20" />
+                      </div>
+                      <div class="shadow-field">
+                        <label for="theme-shadow-blur">blur</label>
+                        <input id="theme-shadow-blur" type="number" min="0" max="30" />
+                      </div>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <label for="theme-shadow-color">Color</label>
+                    <input id="theme-shadow-color" type="color" class="color-input" />
+                  </div>
+                </div>
+              </div>
+              <div class="form-row">
+              <label for="theme-dim">Dim Opacity (0-1)</label>
+              <input id="theme-dim" type="number" min="0" max="1" step="0.05" />
+            </div>
+            </div>
+          </div>
+
+          <div class="inspector-group" id="ccli-group">
+            <button class="section-toggle collapsed" id="ccli-toggle" type="button" aria-expanded="false">
+              <span>CCLI Metadata</span>
+              <span class="chevron" aria-hidden="true">&gt;</span>
+            </button>
+            <div class="section-body" id="ccli-section" hidden>
+              <div class="form-row">
+                <label for="ccli-number">Song Number</label>
+                <input id="ccli-number" type="text" />
+              </div>
+              <div class="form-row">
+                <label for="ccli-authors">Authors (comma-separated)</label>
+                <input id="ccli-authors" type="text" />
+              </div>
+              <div class="form-row">
+                <label for="ccli-publisher">Publisher</label>
+                <input id="ccli-publisher" type="text" />
+              </div>
+              <div class="form-row">
+                <label for="ccli-copyright">Copyright</label>
+                <input id="ccli-copyright" type="text" />
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="context-menu" id="song-context" hidden>
+      <button data-action="copy">Copy Song</button>
+      <button data-action="delete">Delete Song</button>
+    </div>
+
+    <div class="context-menu" id="slide-context" hidden>
+      <button data-action="copy">Copy Slide</button>
+      <button data-action="delete">Delete Slide</button>
+    </div>
+
+    <div class="context-menu" id="media-context" hidden>
+      <button data-action="delete">Delete Slide</button>
+    </div>
+
+    <div class="drop-overlay" id="drop-overlay" hidden>
+      <div class="drop-card">
+        <div class="drop-title">Drop lyric text files</div>
+        <div class="drop-sub">Creates a new song for each .txt file</div>
+      </div>
+    </div>
+
+    <script type="module" src="operator.js"></script>
+  </body>
+</html>

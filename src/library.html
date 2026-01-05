@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Background Library</title>
+    <link rel="stylesheet" href="library.css" />
+  </head>
+  <body>
+    <div class="library-app">
+      <header class="library-header">
+        <div>
+          <div class="library-title">Background Library</div>
+          <div class="library-path" id="library-path">Loading...</div>
+        </div>
+        <div class="library-actions">
+          <div class="library-filters" role="group" aria-label="Filter library">
+            <button id="filter-all" type="button" class="active">All</button>
+            <button id="filter-images" type="button">Images</button>
+            <button id="filter-videos" type="button">Videos</button>
+          </div>
+          <button id="refresh-library" type="button">Refresh</button>
+          <button id="close-library" type="button">Close</button>
+        </div>
+      </header>
+
+      <main class="library-main">
+        <div class="library-grid" id="library-grid"></div>
+        <div class="empty-hint" id="library-empty">No media found in the library folder.</div>
+      </main>
+    </div>
+
+    <script type="module" src="library.js"></script>
+  </body>
+</html>
