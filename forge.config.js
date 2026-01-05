@@ -1,4 +1,5 @@
 module.exports = {
+  outDir: 'out-publish',
   packagerConfig: {
     asar: true
   },
