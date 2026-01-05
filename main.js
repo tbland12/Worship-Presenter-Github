@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, screen, Menu } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, screen, Menu, autoUpdater } = require('electron');
 const path = require('path');
 const fs = require('fs/promises');
 const fssync = require('fs');
@@ -8,6 +8,10 @@ let mainWindow;
 let programWindow;
 let libraryWindow;
 let libraryWindowScope = 'background';
+let updateCheckInProgress = false;
+let updateCheckRequested = false;
+
+const UPDATE_REPOSITORY = 'tbland12/Worship-Presenter-Github';
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.mkv', '.avi', '.webm']);
@@ -108,6 +112,10 @@ function createAppMenu() {
           accelerator: 'Ctrl+S',
           click: () => sendMenuAction('save-project')
         },
+        {
+          label: 'Check for Updates',
+          click: () => checkForUpdates(true)
+        },
         { type: 'separator' },
         { role: 'quit' }
       ]
@@ -119,6 +127,96 @@ function createAppMenu() {
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
+function getUpdateFeedUrl() {
+  const platform = process.platform;
+  const arch = process.arch;
+  return `https://update.electronjs.org/${UPDATE_REPOSITORY}/${platform}-${arch}/${app.getVersion()}`;
+}
+
+function canCheckForUpdates() {
+  return app.isPackaged && process.platform === 'win32';
+}
+
+function checkForUpdates(interactive = false) {
+  if (!canCheckForUpdates()) {
+    if (interactive) {
+      dialog.showMessageBox(getDialogParent() || undefined, {
+        type: 'info',
+        message: 'Updates are available after the app is packaged.',
+        detail: 'Build and install the app to enable update checks.'
+      });
+    }
+    return;
+  }
+  if (updateCheckInProgress) {
+    return;
+  }
+  updateCheckInProgress = true;
+  updateCheckRequested = interactive;
+  try {
+    autoUpdater.setFeedURL({ url: getUpdateFeedUrl() });
+    autoUpdater.checkForUpdates();
+  } catch (error) {
+    updateCheckInProgress = false;
+    updateCheckRequested = false;
+    logError('Failed to check for updates', error);
+    if (interactive) {
+      dialog.showErrorBox('Update Error', String(error?.message || error));
+    }
+  }
+}
+
+function initAutoUpdater() {
+  if (!canCheckForUpdates()) {
+    return;
+  }
+  autoUpdater.on('update-available', () => {
+    if (updateCheckRequested) {
+      dialog.showMessageBox(getDialogParent() || undefined, {
+        type: 'info',
+        message: 'Update available',
+        detail: 'The update is downloading in the background.'
+      });
+    }
+  });
+  autoUpdater.on('update-not-available', () => {
+    if (updateCheckRequested) {
+      dialog.showMessageBox(getDialogParent() || undefined, {
+        type: 'info',
+        message: 'You are up to date.'
+      });
+    }
+    updateCheckInProgress = false;
+    updateCheckRequested = false;
+  });
+  autoUpdater.on('error', (error) => {
+    logError('Auto updater error', error);
+    if (updateCheckRequested) {
+      dialog.showErrorBox('Update Error', String(error?.message || error));
+    }
+    updateCheckInProgress = false;
+    updateCheckRequested = false;
+  });
+  autoUpdater.on('update-downloaded', () => {
+    updateCheckInProgress = false;
+    if (!updateCheckRequested) {
+      updateCheckRequested = false;
+    }
+    const response = dialog.showMessageBoxSync(getDialogParent() || undefined, {
+      type: 'question',
+      buttons: ['Restart', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+      message: 'Update ready',
+      detail: 'Restart the app to apply the update.'
+    });
+    if (response === 0) {
+      autoUpdater.quitAndInstall();
+    }
+    updateCheckRequested = false;
+  });
 }
 
 function getDisplayById(displayId) {
@@ -926,6 +1024,7 @@ ipcMain.on('library:select', (_event, payload) => {
 app.whenReady().then(() => {
   createMainWindow();
   createAppMenu();
+  initAutoUpdater();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

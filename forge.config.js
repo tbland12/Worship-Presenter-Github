@@ -17,8 +17,8 @@ module.exports = {
       name: '@electron-forge/publisher-github',
       config: {
         repository: {
-          owner: 'your-github-user',
-          name: 'worship-presenter'
+          owner: 'tbland12',
+          name: 'Worship-Presenter-Github'
         },
         draft: true,
         prerelease: false
