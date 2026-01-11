@@ -23,3 +23,11 @@ Offline Windows worship lyrics presenter.
 4. Run `npm run publish`.
 5. Find artifacts in `out-publish\make`.
 6. In GitHub Releases, publish the draft release so auto-updates work.
+
+## Release Checklist
+
+- [ ] Update `package.json` version and commit the change.
+- [ ] Run `npm run publish`.
+- [ ] Confirm assets are attached to the `vX.Y.Z` release.
+- [ ] Publish the release (not draft).
+- [ ] Install the new Setup.exe and verify `File -> Check for Updates`.
