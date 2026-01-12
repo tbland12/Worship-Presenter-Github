@@ -4,6 +4,18 @@ const fs = require('fs/promises');
 const fssync = require('fs');
 const { pathToFileURL, fileURLToPath } = require('url');
 
+if (typeof BrowserWindow.prototype.isReadyToShow !== 'function') {
+  BrowserWindow.prototype.isReadyToShow = function isReadyToShow() {
+    if (this.isDestroyed()) {
+      return false;
+    }
+    if (!this.webContents) {
+      return false;
+    }
+    return !this.webContents.isLoading();
+  };
+}
+
 let mainWindow;
 let programWindow;
 let libraryWindow;
