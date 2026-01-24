@@ -1,4 +1,7 @@
 const { app, BrowserWindow, dialog, ipcMain, screen, Menu, autoUpdater } = require('electron');
+if (require('electron-squirrel-startup')) {
+  app.quit();
+}
 const path = require('path');
 const fs = require('fs/promises');
 const fssync = require('fs');

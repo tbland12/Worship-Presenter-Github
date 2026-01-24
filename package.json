@@ -19,6 +19,7 @@
     "electron": "^30.0.0"
   },
   "dependencies": {
+    "electron-squirrel-startup": "^1.0.1",
     "jszip": "^3.10.1"
   }
 }
