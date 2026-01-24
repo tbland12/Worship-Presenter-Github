@@ -2,6 +2,7 @@ const { app, BrowserWindow, dialog, ipcMain, screen, Menu, autoUpdater } = requi
 const path = require('path');
 const fs = require('fs/promises');
 const fssync = require('fs');
+const crypto = require('crypto');
 const { pathToFileURL, fileURLToPath } = require('url');
 
 if (typeof BrowserWindow.prototype.isReadyToShow !== 'function') {
@@ -17,17 +18,169 @@ if (typeof BrowserWindow.prototype.isReadyToShow !== 'function') {
 }
 
 let mainWindow;
-let programWindow;
+const programWindows = new Map();
 let libraryWindow;
 let libraryWindowScope = 'background';
 let updateCheckInProgress = false;
 let updateCheckRequested = false;
+let libraryInitPromise = null;
+let programVisible = false;
+let programDisplayTarget = 'all-external';
+let programDisplayPreference = null;
+let displayChangeTimer = null;
 
 const UPDATE_REPOSITORY = 'tbland12/Worship-Presenter-Github';
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.mkv', '.avi', '.webm']);
 const SESSION_VERSION = 2;
+const LIBRARY_SEED_FILE = '.seeded';
+const DISPLAY_TARGET_ALL_EXTERNAL = 'all-external';
+const TIMER_LIBRARY_FOLDER = 'Timers';
+
+programDisplayPreference = { mode: DISPLAY_TARGET_ALL_EXTERNAL };
+
+function normalizeDisplayTarget(target) {
+  if (target == null) {
+    return DISPLAY_TARGET_ALL_EXTERNAL;
+  }
+  if (target === DISPLAY_TARGET_ALL_EXTERNAL) {
+    return DISPLAY_TARGET_ALL_EXTERNAL;
+  }
+  return String(target);
+}
+
+function nearlyEqual(first, second, epsilon = 0.01) {
+  if (first == null || second == null) {
+    return false;
+  }
+  return Math.abs(first - second) <= epsilon;
+}
+
+function buildDisplayPreference(display) {
+  if (!display) {
+    return { mode: DISPLAY_TARGET_ALL_EXTERNAL };
+  }
+  return {
+    mode: 'display',
+    id: String(display.id),
+    bounds: {
+      x: display.bounds.x,
+      y: display.bounds.y,
+      width: display.bounds.width,
+      height: display.bounds.height
+    },
+    scaleFactor: display.scaleFactor,
+    rotation: display.rotation
+  };
+}
+
+function setProgramDisplayPreference(target, displays = []) {
+  const normalizedTarget = normalizeDisplayTarget(target);
+  programDisplayTarget = normalizedTarget;
+  if (normalizedTarget === DISPLAY_TARGET_ALL_EXTERNAL) {
+    programDisplayPreference = { mode: DISPLAY_TARGET_ALL_EXTERNAL };
+    return;
+  }
+  const match = displays.find((display) => String(display.id) === normalizedTarget);
+  if (match) {
+    programDisplayPreference = buildDisplayPreference(match);
+  } else {
+    programDisplayPreference = { mode: 'display', id: normalizedTarget };
+  }
+}
+
+function centerFromBounds(bounds) {
+  return {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2
+  };
+}
+
+function distanceBetween(first, second) {
+  const dx = first.x - second.x;
+  const dy = first.y - second.y;
+  return Math.hypot(dx, dy);
+}
+
+function matchDisplayPreference(preference, displays) {
+  if (!preference || preference.mode !== 'display') {
+    return null;
+  }
+  const byId = displays.find((display) => String(display.id) === preference.id);
+  if (byId) {
+    return byId;
+  }
+  if (!preference.bounds) {
+    return null;
+  }
+  const exactBounds = displays.find((display) => {
+    if (!boundsEqual(display.bounds, preference.bounds)) {
+      return false;
+    }
+    if (preference.scaleFactor != null && !nearlyEqual(display.scaleFactor, preference.scaleFactor)) {
+      return false;
+    }
+    if (preference.rotation != null && display.rotation !== preference.rotation) {
+      return false;
+    }
+    return true;
+  });
+  if (exactBounds) {
+    return exactBounds;
+  }
+  let candidates = displays.filter((display) => {
+    return display.bounds.width === preference.bounds.width
+      && display.bounds.height === preference.bounds.height;
+  });
+  if (preference.scaleFactor != null) {
+    const scaleMatches = candidates.filter((display) => nearlyEqual(display.scaleFactor, preference.scaleFactor));
+    if (scaleMatches.length > 0) {
+      candidates = scaleMatches;
+    }
+  }
+  if (preference.rotation != null) {
+    const rotationMatches = candidates.filter((display) => display.rotation === preference.rotation);
+    if (rotationMatches.length > 0) {
+      candidates = rotationMatches;
+    }
+  }
+  if (candidates.length === 0) {
+    return null;
+  }
+  const preferredCenter = centerFromBounds(preference.bounds);
+  let best = candidates[0];
+  let bestDistance = distanceBetween(preferredCenter, centerFromBounds(best.bounds));
+  for (let i = 1; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    const distance = distanceBetween(preferredCenter, centerFromBounds(candidate.bounds));
+    if (distance < bestDistance) {
+      best = candidate;
+      bestDistance = distance;
+    }
+  }
+  return best;
+}
+
+function resolvePreferredTarget(displays) {
+  const normalizedTarget = normalizeDisplayTarget(programDisplayTarget);
+  if (!programDisplayPreference || programDisplayPreference.mode !== 'display') {
+    return normalizedTarget;
+  }
+  if (normalizedTarget === DISPLAY_TARGET_ALL_EXTERNAL) {
+    return normalizedTarget;
+  }
+  const match = matchDisplayPreference(programDisplayPreference, displays);
+  if (!match) {
+    return normalizedTarget;
+  }
+  const matchedId = String(match.id);
+  if (normalizedTarget !== matchedId) {
+    programDisplayTarget = matchedId;
+  }
+  programDisplayPreference = buildDisplayPreference(match);
+  return matchedId;
+}
 
 function logError(message, error) {
   console.error(message, error);
@@ -88,14 +241,18 @@ function createMainWindow() {
 
   mainWindow.loadFile(path.join(__dirname, 'src', 'operator.html'));
   mainWindow.on('closed', () => {
-    if (programWindow && !programWindow.isDestroyed()) {
-      programWindow.close();
-    }
+    programWindows.forEach((window) => {
+      if (window && !window.isDestroyed()) {
+        window.close();
+      }
+    });
     if (libraryWindow && !libraryWindow.isDestroyed()) {
       libraryWindow.close();
     }
     mainWindow = null;
   });
+  mainWindow.on('move', scheduleDisplayChange);
+  mainWindow.on('resize', scheduleDisplayChange);
 }
 
 function sendMenuAction(action) {
@@ -111,17 +268,17 @@ function createAppMenu() {
       submenu: [
         {
           label: 'New Project',
-          accelerator: 'Ctrl+N',
+          accelerator: 'CmdOrCtrl+N',
           click: () => sendMenuAction('new-project')
         },
         {
           label: 'Open Project',
-          accelerator: 'Ctrl+O',
+          accelerator: 'CmdOrCtrl+O',
           click: () => sendMenuAction('open-project')
         },
         {
           label: 'Save',
-          accelerator: 'Ctrl+S',
+          accelerator: 'CmdOrCtrl+S',
           click: () => sendMenuAction('save-project')
         },
         {
@@ -236,27 +393,91 @@ function getDisplayById(displayId) {
   return displays.find((d) => d.id === displayId) || screen.getPrimaryDisplay();
 }
 
-function positionProgramWindow(displayId) {
-  if (!programWindow) {
+function getOperatorDisplay() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    const bounds = mainWindow.isMinimized()
+      ? mainWindow.getNormalBounds()
+      : mainWindow.getBounds();
+    return screen.getDisplayMatching(bounds);
+  }
+  return screen.getPrimaryDisplay();
+}
+
+function resolveTargetDisplayIds(target, displays) {
+  const displayIds = displays.map((display) => display.id);
+  if (displayIds.length === 0) {
+    return { target: null, ids: [] };
+  }
+  const displayIdStrings = displayIds.map((id) => String(id));
+  const operatorDisplay = getOperatorDisplay();
+  const operatorId = operatorDisplay ? operatorDisplay.id : displayIds[0];
+  const operatorIdString = operatorId != null ? String(operatorId) : null;
+  const externalIds = operatorId != null
+    ? displayIds.filter((id) => id !== operatorId)
+    : displayIds;
+  let resolvedTarget = target ?? DISPLAY_TARGET_ALL_EXTERNAL;
+  const resolvedTargetString = String(resolvedTarget);
+
+  if (resolvedTargetString === DISPLAY_TARGET_ALL_EXTERNAL) {
+    if (externalIds.length > 0) {
+      return { target: DISPLAY_TARGET_ALL_EXTERNAL, ids: externalIds };
+    }
+    if (operatorId != null) {
+      return { target: DISPLAY_TARGET_ALL_EXTERNAL, ids: [operatorId] };
+    }
+    return { target: DISPLAY_TARGET_ALL_EXTERNAL, ids: displayIds.slice(0, 1) };
+  }
+
+  const targetIndex = displayIdStrings.indexOf(resolvedTargetString);
+  if (targetIndex !== -1) {
+    return { target: displayIdStrings[targetIndex], ids: [displayIds[targetIndex]] };
+  }
+
+  if (externalIds.length > 0) {
+    return { target: DISPLAY_TARGET_ALL_EXTERNAL, ids: externalIds };
+  }
+  if (operatorId != null) {
+    return { target: operatorIdString, ids: [operatorId] };
+  }
+  return { target: displayIdStrings[0] || null, ids: displayIds.slice(0, 1) };
+}
+
+function boundsEqual(first, second) {
+  return first.x === second.x
+    && first.y === second.y
+    && first.width === second.width
+    && first.height === second.height;
+}
+
+function positionProgramWindow(window, displayId) {
+  if (!window || window.isDestroyed()) {
     return;
   }
   const display = getDisplayById(displayId);
-  programWindow.setBounds(display.bounds);
-  programWindow.setFullScreen(true);
-  programWindow.setAlwaysOnTop(true, 'screen-saver');
+  const bounds = display.bounds;
+  const currentBounds = window.getBounds();
+  if (!boundsEqual(currentBounds, bounds)) {
+    window.setBounds(bounds);
+  }
+  if (!window.isFullScreen()) {
+    window.setFullScreen(true);
+  }
+  if (!window.isAlwaysOnTop()) {
+    window.setAlwaysOnTop(true, 'screen-saver');
+  }
 }
 
 function createProgramWindow(displayId) {
-  if (programWindow) {
-    positionProgramWindow(displayId);
-    programWindow.showInactive();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.focus();
+  const existing = programWindows.get(displayId);
+  if (existing && !existing.isDestroyed()) {
+    positionProgramWindow(existing, displayId);
+    if (programVisible) {
+      existing.showInactive();
     }
-    return;
+    return existing;
   }
 
-  programWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     show: false,
     frame: false,
     backgroundColor: '#000000',
@@ -269,30 +490,264 @@ function createProgramWindow(displayId) {
     }
   });
 
-  programWindow.loadFile(path.join(__dirname, 'src', 'program.html'));
-  programWindow.once('ready-to-show', () => {
-    positionProgramWindow(displayId);
-    programWindow.showInactive();
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.focus();
+  programWindows.set(displayId, window);
+  window.loadFile(path.join(__dirname, 'src', 'program.html'));
+  window.once('ready-to-show', () => {
+    positionProgramWindow(window, displayId);
+    if (programVisible) {
+      window.showInactive();
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.focus();
+      }
     }
   });
-  programWindow.on('closed', () => {
-    programWindow = null;
-    if (mainWindow && !mainWindow.isDestroyed()) {
+  window.on('closed', () => {
+    programWindows.delete(displayId);
+    if (programVisible && programWindows.size === 0 && mainWindow && !mainWindow.isDestroyed()) {
+      programVisible = false;
       mainWindow.webContents.send('program:event', { type: 'program-hidden' });
     }
   });
+  return window;
 }
 
-function getLibraryFolder() {
+function closeMissingProgramWindows(displayIds) {
+  const displayIdSet = new Set(displayIds);
+  programWindows.forEach((window, displayId) => {
+    if (displayIdSet.has(displayId)) {
+      return;
+    }
+    if (window && !window.isDestroyed()) {
+      window.close();
+    } else {
+      programWindows.delete(displayId);
+    }
+  });
+}
+
+function showProgramWindows(target, options = {}) {
+  const focusMain = options.focusMain !== false;
+  const updatePreference = options.updatePreference !== false;
+  const displays = options.displays || screen.getAllDisplays();
+  const displayIds = displays.map((display) => display.id);
+  programVisible = true;
+  closeMissingProgramWindows(displayIds);
+  if (updatePreference && target != null) {
+    setProgramDisplayPreference(target, displays);
+  }
+  const preferredTarget = resolvePreferredTarget(displays);
+  const effectiveTarget = target ?? preferredTarget;
+  const resolved = resolveTargetDisplayIds(effectiveTarget, displays);
+  const targetIds = resolved.ids;
+  const targetSet = new Set(targetIds);
+  targetIds.forEach((displayId) => {
+    createProgramWindow(displayId);
+  });
+  programWindows.forEach((window, displayId) => {
+    if (!targetSet.has(displayId)) {
+      if (window && !window.isDestroyed()) {
+        window.close();
+      } else {
+        programWindows.delete(displayId);
+      }
+      return;
+    }
+    positionProgramWindow(window, displayId);
+    if (!window.isVisible() && window.isReadyToShow()) {
+      window.showInactive();
+    }
+  });
+  if (focusMain && mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.focus();
+  }
+}
+
+function hideProgramWindows() {
+  programVisible = false;
+  programWindows.forEach((window) => {
+    if (window && !window.isDestroyed()) {
+      window.hide();
+    }
+  });
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('program:event', { type: 'program-hidden' });
+  }
+}
+
+function handleDisplayChange() {
+  displayChangeTimer = null;
+  const displays = screen.getAllDisplays();
+  const displayIds = displays.map((display) => display.id);
+  const preferredTarget = resolvePreferredTarget(displays);
+  const resolved = resolveTargetDisplayIds(preferredTarget, displays);
+  if (programVisible) {
+    showProgramWindows(preferredTarget, { focusMain: false, displays, updatePreference: false });
+  } else {
+    closeMissingProgramWindows(displayIds);
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('display:changed', {
+      target: programDisplayTarget,
+      resolvedTarget: resolved.target,
+      resolvedDisplayIds: resolved.ids
+    });
+  }
+}
+
+function scheduleDisplayChange() {
+  if (displayChangeTimer) {
+    clearTimeout(displayChangeTimer);
+  }
+  displayChangeTimer = setTimeout(handleDisplayChange, 200);
+}
+
+function getBundledLibraryFolder() {
+  if (app.isPackaged) {
+    const packaged = path.join(process.resourcesPath, 'library');
+    if (fssync.existsSync(packaged)) {
+      return packaged;
+    }
+  }
   return path.join(app.getAppPath(), 'library');
 }
 
+function getLibraryFolder() {
+  return path.join(app.getPath('userData'), 'library');
+}
+
+async function copyLibraryDir(sourceDir, targetDir) {
+  let entries;
+  try {
+    entries = await fs.readdir(sourceDir);
+  } catch (error) {
+    return;
+  }
+  await fs.mkdir(targetDir, { recursive: true });
+  for (const entry of entries) {
+    const sourcePath = path.join(sourceDir, entry);
+    const targetPath = path.join(targetDir, entry);
+    let stat;
+    try {
+      stat = await fs.stat(sourcePath);
+    } catch (error) {
+      continue;
+    }
+    if (stat.isDirectory()) {
+      await copyLibraryDir(sourcePath, targetPath);
+      continue;
+    }
+    if (stat.isFile()) {
+      let targetStat = null;
+      try {
+        targetStat = await fs.stat(targetPath);
+      } catch (error) {
+        targetStat = null;
+      }
+      if (targetStat && targetStat.isDirectory()) {
+        continue;
+      }
+      try {
+        await fs.copyFile(sourcePath, targetPath);
+      } catch (error) {
+        logError('Failed to copy library asset', error);
+      }
+    }
+  }
+}
+
+async function collectLibraryFiles(rootDir, dir, files) {
+  let entries;
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch (error) {
+    return;
+  }
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      await collectLibraryFiles(rootDir, fullPath, files);
+      continue;
+    }
+    if (!entry.isFile()) {
+      continue;
+    }
+    let stat;
+    try {
+      stat = await fs.stat(fullPath);
+    } catch (error) {
+      continue;
+    }
+    files.push({
+      relativePath: path.relative(rootDir, fullPath).replace(/\\/g, '/'),
+      size: stat.size,
+      mtimeMs: stat.mtimeMs
+    });
+  }
+}
+
+async function buildLibrarySignature(rootDir) {
+  const files = [];
+  await collectLibraryFiles(rootDir, rootDir, files);
+  files.sort((first, second) => first.relativePath.localeCompare(second.relativePath));
+  const hash = crypto.createHash('sha256');
+  files.forEach((file) => {
+    hash.update(`${file.relativePath}|${file.size}|${file.mtimeMs}\n`);
+  });
+  return hash.digest('hex');
+}
+
 async function ensureLibraryFolder() {
-  const folder = getLibraryFolder();
-  await fs.mkdir(folder, { recursive: true });
-  return folder;
+  if (libraryInitPromise) {
+    return libraryInitPromise;
+  }
+  libraryInitPromise = (async () => {
+    const folder = getLibraryFolder();
+    await fs.mkdir(folder, { recursive: true });
+    try {
+      const seedPath = path.join(folder, LIBRARY_SEED_FILE);
+      let seedSignature = null;
+      let seedVersion = null;
+      try {
+        const raw = await fs.readFile(seedPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object') {
+          seedSignature = parsed.bundleSignature || null;
+          seedVersion = parsed.version || null;
+        }
+      } catch (error) {
+        seedSignature = null;
+        seedVersion = null;
+      }
+      const bundled = getBundledLibraryFolder();
+      if (!fssync.existsSync(bundled)) {
+        logError('Bundled library folder is missing', bundled);
+        return folder;
+      }
+      let signature = null;
+      try {
+        signature = await buildLibrarySignature(bundled);
+      } catch (error) {
+        logError('Failed to build bundled library manifest', error);
+      }
+      const currentVersion = app.getVersion();
+      if (!signature) {
+        return folder;
+      }
+      if (seedSignature !== signature) {
+        await copyLibraryDir(bundled, folder);
+        const payload = {
+          bundleSignature: signature,
+          version: currentVersion || seedVersion || null,
+          updatedAt: new Date().toISOString()
+        };
+        await fs.writeFile(seedPath, JSON.stringify(payload, null, 2), 'utf8');
+      }
+    } catch (error) {
+      logError('Failed to initialize library folder', error);
+    }
+    return folder;
+  })();
+  return libraryInitPromise;
 }
 
 async function walkLibraryFolder(root, dir, items, options = {}) {
@@ -341,8 +796,11 @@ async function listLibraryItems(options = {}) {
     root = path.join(baseFolder, 'Announcements');
     await fs.mkdir(root, { recursive: true });
     walkOptions.typeFilter = new Set(['image']);
+  } else if (scope === 'timer') {
+    root = path.join(baseFolder, TIMER_LIBRARY_FOLDER);
+    await fs.mkdir(root, { recursive: true });
   } else if (scope === 'background') {
-    walkOptions.excludeDirs = new Set(['announcements']);
+    walkOptions.excludeDirs = new Set(['announcements', TIMER_LIBRARY_FOLDER.toLowerCase()]);
   }
   const items = [];
   await walkLibraryFolder(root, root, items, walkOptions);
@@ -423,6 +881,13 @@ function libraryFolderForType(type) {
   return 'Images';
 }
 
+function libraryFolderForScope(scope, type) {
+  if (scope === 'timer') {
+    return TIMER_LIBRARY_FOLDER;
+  }
+  return libraryFolderForType(type);
+}
+
 function buildLibraryRelativePath(baseName, ext, type) {
   const folder = libraryFolderForType(type);
   return `library/${folder}/${baseName}${ext}`;
@@ -438,6 +903,217 @@ function normalizeLibraryRelativePath(relativePath) {
   }
   const cleaned = relativePath.replace(/^library[\\/]/, '');
   return `library/${cleaned.replace(/\\/g, '/')}`;
+}
+
+function sanitizeRelativePath(value) {
+  if (!value || typeof value !== 'string') {
+    return '';
+  }
+  const cleaned = value.replace(/\\/g, '/').trim().replace(/^\/+/, '');
+  if (!cleaned) {
+    return '';
+  }
+  const normalized = path.posix.normalize(cleaned);
+  if (!normalized || normalized === '.' || normalized === '..') {
+    return '';
+  }
+  if (normalized.startsWith('..') || path.posix.isAbsolute(normalized) || /^[a-zA-Z]:/.test(normalized)) {
+    return '';
+  }
+  return normalized.replace(/^(\.\/)+/, '');
+}
+
+function sanitizePackRoot(root, fallback) {
+  const cleanedRoot = sanitizeRelativePath(root || '');
+  if (cleanedRoot) {
+    return cleanedRoot;
+  }
+  const cleanedFallback = sanitizeRelativePath(fallback || '');
+  if (cleanedFallback) {
+    return cleanedFallback;
+  }
+  return 'Content Pack';
+}
+
+function normalizePackManifest(manifest) {
+  if (!manifest || typeof manifest !== 'object') {
+    return null;
+  }
+  const name = typeof manifest.name === 'string' ? manifest.name.trim() : '';
+  const root = typeof manifest.root === 'string' ? manifest.root.trim() : '';
+  const files = Array.isArray(manifest.files)
+    ? manifest.files.filter((entry) => typeof entry === 'string' && entry.trim()).map((entry) => entry.trim())
+    : [];
+  return { name, root, files };
+}
+
+async function readPackManifestFromFile(filePath) {
+  if (!filePath) {
+    return null;
+  }
+  try {
+    const raw = await fs.readFile(filePath, 'utf8');
+    return normalizePackManifest(JSON.parse(raw));
+  } catch (error) {
+    return null;
+  }
+}
+
+async function collectPackEntriesFromFolder(rootDir) {
+  const entries = [];
+  const walk = async (dir) => {
+    let items;
+    try {
+      items = await fs.readdir(dir, { withFileTypes: true });
+    } catch (error) {
+      return;
+    }
+    for (const item of items) {
+      const fullPath = path.join(dir, item.name);
+      if (item.isDirectory()) {
+        await walk(fullPath);
+        continue;
+      }
+      if (!item.isFile()) {
+        continue;
+      }
+      if (item.name.toLowerCase() === 'manifest.json') {
+        continue;
+      }
+      const ext = path.extname(item.name).toLowerCase();
+      if (!IMAGE_EXTS.has(ext) && !VIDEO_EXTS.has(ext)) {
+        continue;
+      }
+      const relativePath = path.relative(rootDir, fullPath).replace(/\\/g, '/');
+      const stat = await statIfExists(fullPath);
+      entries.push({
+        relativePath,
+        absolutePath: fullPath,
+        size: stat ? stat.size : null
+      });
+    }
+  };
+  await walk(rootDir);
+  return entries;
+}
+
+async function importContentPackFile(libraryDir, baseRoot, entry) {
+  const outcome = { imported: 0, skipped: 0, failed: 0, renamed: 0 };
+  const entryRelative = sanitizeRelativePath(entry.relativePath);
+  if (!entryRelative) {
+    outcome.failed += 1;
+    return outcome;
+  }
+  const ext = path.posix.extname(entryRelative).toLowerCase();
+  if (!IMAGE_EXTS.has(ext) && !VIDEO_EXTS.has(ext)) {
+    outcome.skipped += 1;
+    return outcome;
+  }
+  let targetRelative = baseRoot ? path.posix.join(baseRoot, entryRelative) : entryRelative;
+  targetRelative = sanitizeRelativePath(targetRelative);
+  if (!targetRelative) {
+    outcome.failed += 1;
+    return outcome;
+  }
+  let targetPath = path.join(libraryDir, targetRelative);
+  const relativeCheck = path.relative(libraryDir, targetPath);
+  if (relativeCheck.startsWith('..') || path.isAbsolute(relativeCheck)) {
+    outcome.failed += 1;
+    return outcome;
+  }
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  let dataSize = entry.size;
+  let data = null;
+  if (entry.data) {
+    data = entry.data;
+    if (dataSize == null) {
+      dataSize = data.length;
+    }
+  }
+  const existing = await statIfExists(targetPath);
+  if (existing && dataSize != null && existing.size === dataSize) {
+    outcome.skipped += 1;
+    return outcome;
+  }
+  if (existing && dataSize != null && existing.size !== dataSize) {
+    const base = path.basename(targetPath, path.extname(targetPath));
+    const fileName = uniqueFileName(path.dirname(targetPath), base, ext);
+    targetPath = path.join(path.dirname(targetPath), fileName);
+    outcome.renamed += 1;
+  }
+  try {
+    if (data) {
+      await fs.writeFile(targetPath, data);
+    } else if (entry.absolutePath) {
+      await fs.copyFile(entry.absolutePath, targetPath);
+    } else {
+      outcome.failed += 1;
+      return outcome;
+    }
+  } catch (error) {
+    logError('Failed to import content pack file', error);
+    outcome.failed += 1;
+    return outcome;
+  }
+  outcome.imported += 1;
+  return outcome;
+}
+
+async function importContentPackFromFolder(folderPath) {
+  const manifestPath = path.join(folderPath, 'manifest.json');
+  const manifest = await readPackManifestFromFile(manifestPath);
+  const folderName = path.basename(folderPath);
+  const manifestRoot = manifest ? sanitizeRelativePath(manifest.root || '') : '';
+  const baseRoot = sanitizePackRoot(manifestRoot || (manifest && manifest.name) || folderName, folderName);
+  const sourceRoot = manifestRoot ? path.join(folderPath, manifestRoot) : folderPath;
+  let entries = [];
+  if (manifest && Array.isArray(manifest.files) && manifest.files.length > 0) {
+    const sanitizedFiles = manifest.files.map((file) => sanitizeRelativePath(file)).filter(Boolean);
+    entries = sanitizedFiles.map((file) => ({
+      relativePath: file,
+      absolutePath: path.join(sourceRoot, file),
+      size: null
+    }));
+  } else {
+    entries = await collectPackEntriesFromFolder(sourceRoot);
+  }
+  if (entries.length === 0) {
+    return { error: 'No supported media files found in the selected folder.' };
+  }
+  const libraryDir = await ensureLibraryFolder();
+  const summary = { imported: 0, skipped: 0, failed: 0, renamed: 0, total: entries.length };
+  for (const entry of entries) {
+    if (entry.absolutePath) {
+      const stat = await statIfExists(entry.absolutePath);
+      entry.size = stat ? stat.size : null;
+    }
+    const outcome = await importContentPackFile(libraryDir, baseRoot, entry);
+    summary.imported += outcome.imported;
+    summary.skipped += outcome.skipped;
+    summary.failed += outcome.failed;
+    summary.renamed += outcome.renamed;
+  }
+  return {
+    ...summary,
+    packName: manifest && manifest.name ? manifest.name : folderName
+  };
+}
+
+async function importContentPack(sourcePath) {
+  if (!sourcePath) {
+    return { error: 'No content pack selected.' };
+  }
+  const stat = await statIfExists(sourcePath);
+  if (!stat) {
+    return { error: 'Content pack not found.' };
+  }
+  if (stat.isDirectory()) {
+    return importContentPackFromFolder(sourcePath);
+  }
+  if (stat.isFile() && path.extname(sourcePath).toLowerCase() === '.zip') {
+    return { error: 'Zip content packs are not supported. Please unzip and import the folder.' };
+  }
+  return { error: 'Select a folder content pack to import.' };
 }
 
 function ensureUniqueRelativePath(relativePath, used) {
@@ -470,7 +1146,11 @@ function resolveAssetPath(assetPath, options = {}) {
   }
   if (assetPath.startsWith('library/') || assetPath.startsWith('library\\')) {
     const cleaned = assetPath.replace(/^library[\\/]/, '');
-    return path.join(getLibraryFolder(), cleaned);
+    const libraryPath = path.join(getLibraryFolder(), cleaned);
+    if (fssync.existsSync(libraryPath)) {
+      return libraryPath;
+    }
+    return path.join(getBundledLibraryFolder(), cleaned);
   }
   if (assetPath.startsWith('media/') || assetPath.startsWith('media\\')) {
     if (!options.projectFolder) {
@@ -648,7 +1328,7 @@ async function restoreSessionAssets(project, assets) {
     const base = path.basename(normalizedRelative, ext) || 'background';
     const type = asset.type || mediaTypeFromExt(ext);
     let finalRelative = normalizedRelative;
-    if (!/library\/(Images|Videos)\//i.test(finalRelative)) {
+    if (!/library\/(Images|Videos|Timers)\//i.test(finalRelative)) {
       finalRelative = buildLibraryRelativePath(base, ext, type);
     }
     const cleaned = finalRelative.replace(/^library[\\/]/, '');
@@ -720,6 +1400,15 @@ async function restoreSessionAssets(project, assets) {
 
   return { project, restored };
 }
+
+ipcMain.handle('library:roots', async () => {
+  await ensureLibraryFolder();
+  return {
+    libraryRoot: getLibraryFolder(),
+    bundledLibraryRoot: getBundledLibraryFolder()
+  };
+});
+ipcMain.handle('app:get-version', () => app.getVersion());
 
 ipcMain.handle('project:new', async (_event, options = {}) => {
   try {
@@ -924,12 +1613,17 @@ ipcMain.handle('media:import', async (_event, projectFolder, sourcePath) => {
   };
 });
 
-ipcMain.handle('library:import', async (_event, sourcePath) => {
+ipcMain.handle('library:import', async (_event, payload) => {
+  const sourcePath = typeof payload === 'string' ? payload : payload && payload.sourcePath;
+  const scope = payload && typeof payload === 'object' ? payload.scope : null;
+  if (!sourcePath) {
+    return null;
+  }
   const libraryDir = await ensureLibraryFolder();
   const ext = path.extname(sourcePath);
   const base = path.basename(sourcePath, ext);
   const type = mediaTypeFromExt(ext);
-  const subfolder = libraryFolderForType(type);
+  const subfolder = libraryFolderForScope(scope, type);
   const targetDir = path.join(libraryDir, subfolder);
   await ensureDir(targetDir);
   const fileName = uniqueFileName(targetDir, base, ext);
@@ -940,6 +1634,26 @@ ipcMain.handle('library:import', async (_event, sourcePath) => {
     relativePath: path.posix.join('library', relative),
     absolutePath: target
   };
+});
+
+ipcMain.handle('content-pack:import', async (_event, options = {}) => {
+  try {
+    let sourcePath = options && options.sourcePath ? options.sourcePath : null;
+    if (!sourcePath) {
+      const result = await showOpenDialogSafe({
+        title: 'Import Content Pack (Folder)',
+        properties: ['openDirectory']
+      });
+      if (result.canceled || result.filePaths.length === 0) {
+        return { canceled: true };
+      }
+      sourcePath = result.filePaths[0];
+    }
+    return await importContentPack(sourcePath);
+  } catch (error) {
+    logError('Failed to import content pack', error);
+    return { error: 'Failed to import content pack.' };
+  }
 });
 
 ipcMain.handle('announcement:import', async (_event, sourcePath) => {
@@ -968,42 +1682,56 @@ ipcMain.handle('display:list', async () => {
 });
 
 ipcMain.on('program:show', (_event, displayId) => {
-  createProgramWindow(displayId);
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.focus();
-  }
+  showProgramWindows(displayId);
 });
 
 ipcMain.on('program:hide', () => {
-  if (programWindow) {
-    programWindow.hide();
-  }
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('program:event', { type: 'program-hidden' });
-  }
+  hideProgramWindows();
 });
 
 ipcMain.on('program:set-display', (_event, displayId) => {
-  if (programWindow) {
-    positionProgramWindow(displayId);
+  const displays = screen.getAllDisplays();
+  setProgramDisplayPreference(displayId, displays);
+  if (programVisible) {
+    showProgramWindows(programDisplayTarget, { displays, updatePreference: false });
   }
 });
 
 ipcMain.on('program:toggle-fullscreen', () => {
-  if (programWindow) {
-    programWindow.setFullScreen(!programWindow.isFullScreen());
-  }
+  programWindows.forEach((window) => {
+    if (window && !window.isDestroyed()) {
+      window.setFullScreen(!window.isFullScreen());
+    }
+  });
 });
 
 ipcMain.on('program:state', (_event, state) => {
-  if (programWindow && !programWindow.isDestroyed()) {
-    programWindow.webContents.send('program:state', state);
-  }
+  programWindows.forEach((window) => {
+    if (window && !window.isDestroyed()) {
+      window.webContents.send('program:state', state);
+    }
+  });
 });
 
 ipcMain.on('program:event', (_event, payload) => {
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('program:event', payload);
+  }
+});
+
+ipcMain.on('edit:command', (_event, command) => {
+  const allowed = new Set(['undo', 'redo', 'cut', 'copy', 'paste', 'selectAll']);
+  if (!allowed.has(command)) {
+    return;
+  }
+  const focused = BrowserWindow.getFocusedWindow();
+  if (!focused || focused.isDestroyed()) {
+    return;
+  }
+  const contents = focused.webContents;
+  const handler = contents && typeof contents[command] === 'function' ? contents[command] : null;
+  if (handler) {
+    handler.call(contents);
   }
 });
 
@@ -1037,6 +1765,9 @@ app.whenReady().then(() => {
   createMainWindow();
   createAppMenu();
   initAutoUpdater();
+  screen.on('display-added', scheduleDisplayChange);
+  screen.on('display-removed', scheduleDisplayChange);
+  screen.on('display-metrics-changed', scheduleDisplayChange);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

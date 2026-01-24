@@ -20,8 +20,6 @@ const elements = {
   addAnnouncement: document.getElementById('add-announcement'),
   announcements: document.getElementById('announcements-list'),
   announcementsEmpty: document.getElementById('announcements-empty'),
-  announcementsPreview: document.getElementById('announcements-preview-list'),
-  announcementsPreviewEmpty: document.getElementById('announcements-preview-empty'),
   announcementsButton: document.getElementById('select-announcements'),
   addTimerSlide: document.getElementById('add-timer-slide'),
   timerList: document.getElementById('timer-list'),
@@ -36,6 +34,7 @@ const elements = {
   previewSplitter: document.getElementById('preview-splitter'),
   previewCard: document.getElementById('preview-card'),
   previewWrap: document.getElementById('preview-wrap'),
+  editorTitle: document.getElementById('editor-title'),
   songEditor: document.getElementById('song-editor'),
   announcementEditor: document.getElementById('announcement-editor'),
   timerEditor: document.getElementById('timer-editor'),
@@ -65,9 +64,9 @@ const elements = {
   openAnnouncementLibrary: document.getElementById('open-announcement-library'),
   uploadAnnouncement: document.getElementById('upload-announcement'),
   announcementPath: document.getElementById('announcement-path'),
-  announcementAuto: document.getElementById('announcement-auto'),
   announcementAdvance: document.getElementById('announcement-advance'),
   announcementLoop: document.getElementById('announcement-loop'),
+  announcementHideLoop: document.getElementById('announcement-hide-loop'),
   timerInspector: document.getElementById('timer-inspector'),
   openTimerLibrary: document.getElementById('open-timer-library'),
   uploadTimerMedia: document.getElementById('upload-timer-media'),
@@ -126,6 +125,25 @@ if (!apiBridge) {
   }, 200);
 }
 
+const DISPLAY_TARGET_ALL_EXTERNAL = 'all-external';
+
+async function applyVersionLabel() {
+  if (!apiBridge || !apiBridge.getAppVersion) {
+    return;
+  }
+  try {
+    const version = await apiBridge.getAppVersion();
+    const label = version ? `Worship Presenter (${version})` : 'Worship Presenter';
+    const brand = document.querySelector('.brand-title');
+    if (brand) {
+      brand.textContent = label;
+    }
+    document.title = label;
+  } catch (error) {
+    console.error('Failed to load app version', error);
+  }
+}
+
 const state = {
   project: createNewProject(),
   projectFolder: null,
@@ -140,8 +158,8 @@ const state = {
   live: { section: null, songId: null, slideIndex: 0 },
   panic: false,
   autoGoLive: false,
-  followLive: false,
-  displayId: null,
+  followLive: true,
+  displayTarget: null,
   themeTarget: 'lyrics',
   runtimeBackgrounds: {},
   libraryTarget: null
@@ -158,6 +176,198 @@ const PREVIEW_BASE = { width: 1920, height: 1080 };
 let previewObserver = null;
 let previewSplitState = null;
 const SECTION_HEADER_REGEX = /^(verse|chorus|bridge|pre-chorus|prechorus|intro|outro|tag|refrain|ending|hook)(\s+\d+)?$/i;
+let announcementDragState = null;
+
+function cleanupAnnouncementDragState(options = {}) {
+  const resumeAutoAdvance = options.resumeAutoAdvance === true;
+  const pausedAutoAdvance = announcementDragState && announcementDragState.pausedAutoAdvance;
+  if (announcementDragState) {
+    const { draggingItem, ghost } = announcementDragState;
+    if (draggingItem) {
+      draggingItem.classList.remove('dragging');
+    }
+    if (ghost && ghost.parentNode) {
+      ghost.parentNode.removeChild(ghost);
+    }
+  }
+  announcementDragState = null;
+  clearAnnouncementDragIndicators();
+  if (resumeAutoAdvance && pausedAutoAdvance) {
+    updateAutoAdvanceTimers();
+  }
+}
+
+function setAnnouncementDragGhost(event, item) {
+  if (!event || !event.dataTransfer || !item) {
+    return null;
+  }
+  const ghost = item.cloneNode(true);
+  ghost.classList.add('drag-ghost');
+  ghost.style.width = `${item.offsetWidth}px`;
+  ghost.style.height = `${item.offsetHeight}px`;
+  ghost.style.position = 'absolute';
+  ghost.style.top = '-1000px';
+  ghost.style.left = '-1000px';
+  ghost.style.pointerEvents = 'none';
+  document.body.appendChild(ghost);
+  event.dataTransfer.setDragImage(ghost, Math.min(40, item.offsetWidth / 2), Math.min(20, item.offsetHeight / 2));
+  return ghost;
+}
+
+function pauseAnnouncementAutoAdvanceForDrag() {
+  if (state.live.section !== 'announcements') {
+    return false;
+  }
+  clearAnnouncementAdvanceTimer();
+  return true;
+}
+
+function isSameOrder(current, next) {
+  if (current === next) {
+    return true;
+  }
+  if (!current || !next || current.length !== next.length) {
+    return false;
+  }
+  for (let i = 0; i < current.length; i += 1) {
+    if (current[i] !== next[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getAnnouncementOrderAfterHover(order, draggingId, targetId) {
+  if (!order || !draggingId || !targetId || draggingId === targetId) {
+    return order;
+  }
+  const fromIndex = order.indexOf(draggingId);
+  const targetIndex = order.indexOf(targetId);
+  if (fromIndex === -1 || targetIndex === -1 || fromIndex === targetIndex) {
+    return order;
+  }
+  const nextOrder = order.filter((id) => id !== draggingId);
+  const adjustedTargetIndex = nextOrder.indexOf(targetId);
+  const movingDown = fromIndex < targetIndex;
+  const insertIndex = movingDown ? adjustedTargetIndex + 1 : adjustedTargetIndex;
+  nextOrder.splice(insertIndex, 0, draggingId);
+  return nextOrder;
+}
+
+function applyAnnouncementPreviewOrder(list, order) {
+  if (!list || !order || order.length === 0) {
+    return;
+  }
+  const itemsById = new Map();
+  Array.from(list.children).forEach((item) => {
+    const id = item.dataset.slideId;
+    if (id) {
+      itemsById.set(id, item);
+    }
+  });
+  const fragment = document.createDocumentFragment();
+  order.forEach((id) => {
+    const item = itemsById.get(id);
+    if (item) {
+      fragment.appendChild(item);
+    }
+  });
+  list.appendChild(fragment);
+}
+
+function updateAnnouncementPreviewOrder(list, targetId) {
+  if (!announcementDragState || !announcementDragState.previewOrder) {
+    return;
+  }
+  if (announcementDragState.lastTargetId === targetId) {
+    return;
+  }
+  const nextOrder = getAnnouncementOrderAfterHover(
+    announcementDragState.previewOrder,
+    announcementDragState.draggingId,
+    targetId
+  );
+  if (isSameOrder(announcementDragState.previewOrder, nextOrder)) {
+    return;
+  }
+  announcementDragState.previewOrder = nextOrder;
+  announcementDragState.lastTargetId = targetId;
+  applyAnnouncementPreviewOrder(list, nextOrder);
+}
+
+function commitAnnouncementDrag(list) {
+  if (!announcementDragState || !list || announcementDragState.list !== list) {
+    return false;
+  }
+  const slides = state.project.announcements.slides || [];
+  const order = announcementDragState.previewOrder || slides.map((slide) => slide.id);
+  if (order.length !== slides.length) {
+    return false;
+  }
+  const slideMap = new Map(slides.map((slide) => [slide.id, slide]));
+  const selectedId = slides[state.selectedAnnouncementIndex]?.id || null;
+  const newSlides = order.map((id) => slideMap.get(id)).filter(Boolean);
+  if (newSlides.length !== slides.length) {
+    return false;
+  }
+  state.project.announcements.slides = newSlides;
+  if (selectedId) {
+    const nextIndex = newSlides.findIndex((slide) => slide.id === selectedId);
+    state.selectedAnnouncementIndex = nextIndex >= 0 ? nextIndex : 0;
+  }
+  state.preview = { section: 'announcements', songId: null, slideIndex: state.selectedAnnouncementIndex };
+  refreshAll();
+  saveProjectIfPossible();
+  return true;
+}
+
+function getVisibleAnnouncementIndices(slides) {
+  return (slides || []).reduce((acc, slide, index) => {
+    if (!slide || slide.hideDuringLoop) {
+      return acc;
+    }
+    acc.push(index);
+    return acc;
+  }, []);
+}
+
+function getNextAnnouncementIndex(currentIndex, slides, loopEnabled) {
+  if (!slides || slides.length === 0) {
+    return currentIndex;
+  }
+  if (!loopEnabled) {
+    return currentIndex < slides.length - 1 ? currentIndex + 1 : currentIndex;
+  }
+  const visible = getVisibleAnnouncementIndices(slides);
+  if (visible.length === 0) {
+    return currentIndex;
+  }
+  const currentPos = visible.indexOf(currentIndex);
+  if (currentPos === -1) {
+    return visible[0];
+  }
+  const nextPos = (currentPos + 1) % visible.length;
+  return visible[nextPos];
+}
+
+function getPreviousAnnouncementIndex(currentIndex, slides, loopEnabled) {
+  if (!slides || slides.length === 0) {
+    return currentIndex;
+  }
+  if (!loopEnabled) {
+    return currentIndex > 0 ? currentIndex - 1 : currentIndex;
+  }
+  const visible = getVisibleAnnouncementIndices(slides);
+  if (visible.length === 0) {
+    return currentIndex;
+  }
+  const currentPos = visible.indexOf(currentIndex);
+  if (currentPos === -1) {
+    return visible[visible.length - 1];
+  }
+  const prevPos = (currentPos - 1 + visible.length) % visible.length;
+  return visible[prevPos];
+}
 
 function updatePreviewScale() {
   const stage = elements.previewStage;
@@ -371,17 +581,25 @@ function normalizeProject(project) {
   normalized.settings = { ...base.settings, ...(normalized.settings || {}) };
   normalized.announcements = { ...base.announcements, ...(normalized.announcements || {}) };
   normalized.timer = { ...base.timer, ...(normalized.timer || {}) };
+  if (normalized.announcements.loop == null) {
+    normalized.announcements.loop = true;
+  } else {
+    normalized.announcements.loop = normalized.announcements.loop === true;
+  }
+  normalized.announcements.autoAdvanceEnabled = normalized.announcements.loop;
   normalized.setlist = Array.isArray(normalized.setlist) ? normalized.setlist : [];
   normalized.songs = normalized.songs || {};
 
   const normalizeMediaSlide = (slide, index) => {
     const mediaPath = slide.mediaPath || slide.path || (slide.background && slide.background.path) || '';
     const mediaType = slide.mediaType || slide.type || (slide.background && slide.background.type) || 'image';
+    const hideDuringLoop = slide.hideDuringLoop === true;
     return {
       id: slide.id || `media-${crypto.randomUUID()}`,
       label: slide.label || `Slide ${index + 1}`,
       mediaPath,
-      mediaType: mediaType === 'video' ? 'video' : 'image'
+      mediaType: mediaType === 'video' ? 'video' : 'image',
+      hideDuringLoop
     };
   };
 
@@ -775,100 +993,164 @@ function updateEditorVisibility() {
   if (elements.timerEditor) {
     elements.timerEditor.hidden = section !== 'timer';
   }
+  updateEditorTitle();
+}
+
+function updateEditorTitle() {
+  if (!elements.editorTitle) {
+    return;
+  }
+  if (state.selectedSection === 'announcements') {
+    elements.editorTitle.textContent = 'Announcement Editor';
+  } else if (state.selectedSection === 'timer') {
+    elements.editorTitle.textContent = 'Timer Editor';
+  } else {
+    elements.editorTitle.textContent = 'Song Editor';
+  }
 }
 
 function renderAnnouncements() {
   const slides = (state.project.announcements && state.project.announcements.slides) || [];
-  const targets = [
-    { list: elements.announcements, empty: elements.announcementsEmpty, showEmpty: true },
-    { list: elements.announcementsPreview, empty: elements.announcementsPreviewEmpty, showEmpty: false }
-  ];
+  const list = elements.announcements;
+  if (!list) {
+    return;
+  }
+  list.innerHTML = '';
+  if (!list.dataset.dragHandlers) {
+    list.dataset.dragHandlers = 'true';
+    list.addEventListener('dragover', (event) => {
+      if (!announcementDragState || announcementDragState.list !== list) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+    });
+    list.addEventListener('drop', (event) => {
+      if (!announcementDragState || announcementDragState.list !== list) {
+        return;
+      }
+      event.preventDefault();
+      internalDragActive = false;
+      const committed = commitAnnouncementDrag(list);
+      cleanupAnnouncementDragState({ resumeAutoAdvance: true });
+      if (!committed) {
+        renderAnnouncements();
+      }
+    });
+  }
+  if (elements.announcementsEmpty) {
+    elements.announcementsEmpty.style.display = slides.length === 0 ? 'block' : 'none';
+  }
 
-  targets.forEach(({ list, empty, showEmpty }) => {
-    if (!list) {
+  const slideMap = new Map(slides.map((slide) => [slide.id, slide]));
+  const indexMap = new Map(slides.map((slide, index) => [slide.id, index]));
+  const defaultOrder = slides.map((slide) => slide.id);
+  const order =
+    announcementDragState && announcementDragState.previewOrder && announcementDragState.previewOrder.length === slides.length
+      ? announcementDragState.previewOrder
+      : defaultOrder;
+  const selectedId = slides[state.selectedAnnouncementIndex]?.id || null;
+
+  order.forEach((slideId) => {
+    const slide = slideMap.get(slideId);
+    if (!slide) {
       return;
     }
-    list.innerHTML = '';
-    if (empty) {
-      empty.style.display = slides.length === 0 && showEmpty ? 'block' : 'none';
+    const index = indexMap.get(slideId);
+    if (index == null) {
+      return;
+    }
+    const item = document.createElement('li');
+    item.className = 'list-item draggable';
+    item.draggable = true;
+    item.dataset.index = String(index);
+    item.dataset.slideId = slideId;
+    if (state.selectedSection === 'announcements' && slideId === selectedId) {
+      item.classList.add('active');
+    }
+    if (announcementDragState && announcementDragState.draggingId === slideId) {
+      item.classList.add('dragging');
     }
 
-    slides.forEach((slide, index) => {
-      const item = document.createElement('li');
-      item.className = 'list-item draggable';
-      item.draggable = true;
-      item.dataset.index = String(index);
-      if (state.selectedSection === 'announcements' && state.selectedAnnouncementIndex === index) {
-        item.classList.add('active');
-      }
+    const thumb = document.createElement('div');
+    thumb.className = 'media-thumb';
+    const mediaUrl = resolveMediaPath(slide.mediaPath);
+    if (mediaUrl) {
+      const img = document.createElement('img');
+      img.src = mediaUrl;
+      img.alt = slide.label || `Announcement ${index + 1}`;
+      thumb.appendChild(img);
+    } else {
+      thumb.innerHTML = '<span class="media-label">No image</span>';
+    }
 
-      const thumb = document.createElement('div');
-      thumb.className = 'media-thumb';
-      const mediaUrl = resolveMediaPath(slide.mediaPath);
-      if (mediaUrl) {
-        const img = document.createElement('img');
-        img.src = mediaUrl;
-        img.alt = slide.label || `Announcement ${index + 1}`;
-        thumb.appendChild(img);
-      } else {
-        thumb.innerHTML = '<span class="media-label">No image</span>';
-      }
+    if (slide.hideDuringLoop) {
+      item.classList.add('loop-hidden');
+      const flag = document.createElement('div');
+      flag.className = 'media-flag';
+      flag.textContent = 'Loop hidden';
+      thumb.appendChild(flag);
+    }
 
-      item.appendChild(thumb);
+    item.appendChild(thumb);
 
-      item.addEventListener('click', () => selectAnnouncementSlide(index));
-      item.addEventListener('contextmenu', (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        selectAnnouncementSlide(index);
-        showMediaContextMenu(event.clientX, event.clientY, index, 'announcements');
-      });
-      item.addEventListener('dragstart', (event) => {
-        internalDragActive = true;
-        event.dataTransfer.effectAllowed = 'move';
-        event.dataTransfer.setData('text/plain', String(index));
-        event.dataTransfer.setData('application/x-wp-internal', 'announcements');
-        item.classList.add('dragging');
-        hideMediaContextMenu();
-      });
-      item.addEventListener('dragend', () => {
-        internalDragActive = false;
-        item.classList.remove('dragging');
-        clearAnnouncementDragIndicators();
-      });
-      item.addEventListener('dragover', (event) => {
-        event.preventDefault();
-        event.dataTransfer.dropEffect = 'move';
-        const rect = item.getBoundingClientRect();
-        const position = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
-        if (item.dataset.dropPosition !== position) {
-          clearAnnouncementDragIndicators();
-          item.dataset.dropPosition = position;
-          item.classList.toggle('drag-over-before', position === 'before');
-          item.classList.toggle('drag-over-after', position === 'after');
-        }
-      });
-      item.addEventListener('dragleave', (event) => {
-        if (!item.contains(event.relatedTarget)) {
-          item.classList.remove('drag-over-before', 'drag-over-after');
-          delete item.dataset.dropPosition;
-        }
-      });
-      item.addEventListener('drop', (event) => {
-        event.preventDefault();
-        internalDragActive = false;
-        const fromIndex = Number(event.dataTransfer.getData('text/plain'));
-        const toIndex = Number(item.dataset.index);
-        const position = item.dataset.dropPosition || 'before';
-        if (Number.isNaN(fromIndex) || Number.isNaN(toIndex)) {
-          return;
-        }
-        reorderAnnouncement(fromIndex, toIndex, position);
-        clearAnnouncementDragIndicators();
-      });
-
-      list.appendChild(item);
+    item.addEventListener('click', () => selectAnnouncementSlide(index));
+    item.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      selectAnnouncementSlide(index);
+      showMediaContextMenu(event.clientX, event.clientY, index, 'announcements');
     });
+    item.addEventListener('dragstart', (event) => {
+      internalDragActive = true;
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', String(index));
+      event.dataTransfer.setData('application/x-wp-internal', 'announcements');
+      item.classList.add('dragging');
+      const ghost = setAnnouncementDragGhost(event, item);
+      const previewOrder = [...defaultOrder];
+      const pausedAutoAdvance = pauseAnnouncementAutoAdvanceForDrag();
+      announcementDragState = {
+        draggingItem: item,
+        draggingId: slideId,
+        list,
+        ghost,
+        previewOrder,
+        pausedAutoAdvance,
+        lastTargetId: null
+      };
+      hideMediaContextMenu();
+    });
+    item.addEventListener('dragend', () => {
+      internalDragActive = false;
+      cleanupAnnouncementDragState({ resumeAutoAdvance: true });
+      renderAnnouncements();
+    });
+    item.addEventListener('dragover', (event) => {
+      if (!announcementDragState || announcementDragState.list !== list) {
+        return;
+      }
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'move';
+      if (announcementDragState.draggingId === slideId) {
+        return;
+      }
+      updateAnnouncementPreviewOrder(list, slideId);
+    });
+    item.addEventListener('drop', (event) => {
+      if (!announcementDragState || announcementDragState.list !== list) {
+        return;
+      }
+      event.preventDefault();
+      internalDragActive = false;
+      const committed = commitAnnouncementDrag(list);
+      cleanupAnnouncementDragState({ resumeAutoAdvance: true });
+      if (!committed) {
+        renderAnnouncements();
+      }
+    });
+
+    list.appendChild(item);
   });
 }
 
@@ -1238,10 +1520,10 @@ function renderInspector() {
       return;
     }
     elements.announcementPath.textContent = slide.mediaPath ? slide.mediaPath : 'No announcement selected';
-    elements.announcementAuto.checked = state.project.announcements.autoAdvanceEnabled !== false;
     elements.announcementAdvance.value = state.project.announcements.autoAdvanceSec ?? 15;
     elements.announcementLoop.checked = state.project.announcements.loop === true;
-    elements.announcementAdvance.disabled = !elements.announcementAuto.checked;
+    elements.announcementAdvance.disabled = !elements.announcementLoop.checked;
+    elements.announcementHideLoop.checked = slide.hideDuringLoop === true;
     elements.openAnnouncementLibrary.disabled = false;
     elements.uploadAnnouncement.disabled = false;
     return;
@@ -1510,15 +1792,19 @@ function updateAutoAdvanceTimers() {
     if (slides.length === 0) {
       return;
     }
-    if (state.project.announcements.autoAdvanceEnabled === false) {
+    if (announcementDragState) {
+      return;
+    }
+    const loopEnabled = state.project.announcements.loop === true;
+    if (!loopEnabled) {
       return;
     }
     const intervalSec = Number(state.project.announcements.autoAdvanceSec) || 0;
     if (intervalSec <= 0) {
       return;
     }
-    const isLast = state.live.slideIndex >= slides.length - 1;
-    if (isLast && !state.project.announcements.loop) {
+    const nextIndex = getNextAnnouncementIndex(state.live.slideIndex, slides, loopEnabled);
+    if (nextIndex === state.live.slideIndex) {
       return;
     }
     announcementAdvanceTimer = window.setTimeout(() => {
@@ -2026,7 +2312,7 @@ function clearSlideDragIndicators() {
 }
 
 function clearAnnouncementDragIndicators() {
-  const lists = [elements.announcements, elements.announcementsPreview].filter(Boolean);
+  const lists = [elements.announcements].filter(Boolean);
   if (lists.length === 0) {
     return;
   }
@@ -2417,7 +2703,7 @@ async function applyTimerMediaFromSource(sourcePath) {
   elements.timerMediaPath.textContent = 'Importing media...';
   let imported = null;
   try {
-    imported = await window.api.importLibrary(sourcePath);
+    imported = await window.api.importLibrary({ sourcePath, scope: 'timer' });
   } catch (error) {
     console.error('Failed to import timer media', error);
     elements.timerMediaPath.textContent = 'Import failed. See console.';
@@ -2461,6 +2747,19 @@ function isTextFileName(name = '') {
   return name.toLowerCase().endsWith('.txt');
 }
 
+function isPowerPointFileName(name = '') {
+  return name.toLowerCase().endsWith('.pptx');
+}
+
+function isLegacyPowerPointFileName(name = '') {
+  return name.toLowerCase().endsWith('.ppt');
+}
+
+function isImageFileName(name = '') {
+  const lower = name.toLowerCase();
+  return lower.endsWith('.png') || lower.endsWith('.jpg') || lower.endsWith('.jpeg');
+}
+
 function isFileDrag(event) {
   if (internalDragActive) {
     return false;
@@ -2489,10 +2788,20 @@ async function handleLyricsDrop(event) {
   }
   event.preventDefault();
   event.stopPropagation();
-  const textFiles = files.filter((file) => isTextFileName(file.name || ''));
-  if (textFiles.length === 0) {
-    window.alert('Only .txt lyric files are supported.');
+  const textFiles = files.filter((file) => isTextFileName(file.name || file.path || ''));
+  const pptxFiles = files.filter((file) => isPowerPointFileName(file.name || file.path || ''));
+  const pptFiles = files.filter((file) => isLegacyPowerPointFileName(file.name || file.path || ''));
+  const imageFiles = files.filter((file) => isImageFileName(file.name || file.path || ''));
+  if (textFiles.length === 0 && pptxFiles.length === 0 && imageFiles.length === 0) {
+    if (pptFiles.length > 0) {
+      window.alert('PowerPoint .ppt files are not supported. Please save as .pptx.');
+    } else {
+      window.alert('Only .txt lyric files, .pptx PowerPoint files, or image files are supported.');
+    }
     return;
+  }
+  if (pptFiles.length > 0) {
+    window.alert('PowerPoint .ppt files are not supported. Please save as .pptx.');
   }
 
   for (const file of textFiles) {
@@ -2503,9 +2812,44 @@ async function handleLyricsDrop(event) {
       await importLyricsFromText(text, { forceNew: true });
     }
   }
+
+  for (const file of pptxFiles) {
+    await importPowerPointFromFile(file, { forceNew: true });
+  }
+
+  if (imageFiles.length > 0) {
+    if (state.selectedSection === 'announcements') {
+      for (const file of imageFiles) {
+        if (!file.path) {
+          window.alert('Dropped images need a file path to import.');
+          return;
+        }
+        addAnnouncementSlide();
+        await applyAnnouncementFromSource(file.path);
+      }
+    } else if (state.selectedSection === 'setlist') {
+      const song = getSelectedSong();
+      if (!song) {
+        if (!state.project.setlist || state.project.setlist.length === 0) {
+          window.alert('Import or create a song before setting a background.');
+        } else {
+          window.alert('Select a song before setting a background.');
+        }
+        return;
+      }
+      const file = imageFiles[0];
+      if (!file.path) {
+        window.alert('Dropped images need a file path to import.');
+        return;
+      }
+      await applyBackgroundFromSource(file.path, { target: 'library' });
+    } else {
+      window.alert('Select Announcements or a song in the setlist to use dropped images.');
+    }
+  }
 }
 
-function isMetadataLine(line, hasMeta) {
+function isMetadataLine(line, hasMeta, allowCommaMeta = true) {
   if (!line) {
     return false;
   }
@@ -2516,13 +2860,92 @@ function isMetadataLine(line, hasMeta) {
   if (lower.includes('songselect') || lower.includes('www.ccli.com')) {
     return true;
   }
-  if (/(public domain|copyright|publisher|publishing|admin|words:|music:)/i.test(line)) {
+  if (/(public domain|copyright|publisher|publishing|admin|words:|music:|license|\u00a9|\(c\)|all rights reserved)/i.test(line)) {
     return true;
   }
-  if (hasMeta && line.includes(',') && !SECTION_HEADER_REGEX.test(line)) {
+  if (allowCommaMeta && hasMeta && line.includes(',') && !SECTION_HEADER_REGEX.test(line)) {
     return true;
   }
   return false;
+}
+
+function parseCcliMetadata(metadataLines = [], existing = {}) {
+  const ccliMeta = {
+    songNumber: '',
+    authors: [],
+    publisher: '',
+    copyright: '',
+    license: ''
+  };
+
+  metadataLines.forEach((line) => {
+    const ccliMatch = line.match(/CCLI\s*(Song)?\s*#\s*(\d+)/i);
+    if (ccliMatch) {
+      ccliMeta.songNumber = ccliMatch[2];
+    }
+    const licenseMatch = line.match(/CCLI\s*License\s*#?\s*(\d+)/i);
+    if (licenseMatch) {
+      ccliMeta.license = licenseMatch[1];
+    }
+    if (!ccliMeta.authors.length && line.includes(',') && !/ccli|songselect|www\./i.test(line)) {
+      ccliMeta.authors = line.split(',').map((part) => part.trim()).filter(Boolean);
+      return;
+    }
+    if (!ccliMeta.authors.length && isLikelyAuthorLine(line)) {
+      ccliMeta.authors = splitAuthors(line);
+      return;
+    }
+    if (!ccliMeta.publisher && /publisher|publishing/i.test(line)) {
+      ccliMeta.publisher = line;
+      return;
+    }
+    if (
+      !ccliMeta.copyright
+      && /(public domain|copyright|\u00a9|\(c\)|all rights reserved|license)/i.test(line)
+    ) {
+      ccliMeta.copyright = line;
+    }
+  });
+
+  if (ccliMeta.license) {
+    const licenseText = `CCLI License # ${ccliMeta.license}`;
+    if (!ccliMeta.copyright) {
+      ccliMeta.copyright = licenseText;
+    } else if (!ccliMeta.copyright.includes(licenseText)) {
+      ccliMeta.copyright = `${ccliMeta.copyright} ${licenseText}`;
+    }
+  }
+
+  return {
+    songNumber: ccliMeta.songNumber || existing.songNumber || '',
+    authors: ccliMeta.authors.length ? ccliMeta.authors : existing.authors || [],
+    publisher: ccliMeta.publisher || existing.publisher || '',
+    copyright: ccliMeta.copyright || existing.copyright || ''
+  };
+}
+
+function isLikelyAuthorLine(line = '') {
+  if (!line) {
+    return false;
+  }
+  if (/(ccli|songselect|www\.|public domain|copyright|publisher|publishing|admin|words:|music:|license)/i.test(line)) {
+    return false;
+  }
+  const words = line.trim().split(/\s+/).filter(Boolean);
+  if (words.length < 2) {
+    return false;
+  }
+  if (/[,&/;]/.test(line) || /\band\b/i.test(line)) {
+    return true;
+  }
+  return false;
+}
+
+function splitAuthors(line = '') {
+  return line
+    .split(/\s*(?:,|&|\band\b|;|\/)\s*/i)
+    .map((part) => part.trim())
+    .filter(Boolean);
 }
 
 function parseLyricsFile(rawText) {
@@ -2602,7 +3025,7 @@ function applyLyricsImport(parsed, options = {}) {
   if (!parsed) {
     return;
   }
-  const forceNew = options.forceNew === true;
+  const forceNew = options.forceNew !== false;
   let song = forceNew ? null : getSelectedSong();
   if (!song) {
     song = createSong('New Song');
@@ -2618,38 +3041,7 @@ function applyLyricsImport(parsed, options = {}) {
     song.title = parsed.title;
   }
 
-  const ccliMeta = {
-    songNumber: '',
-    authors: [],
-    publisher: '',
-    copyright: ''
-  };
-
-  parsed.metadataLines.forEach((line) => {
-    const ccliMatch = line.match(/CCLI\s*(Song)?\s*#\s*(\d+)/i);
-    if (ccliMatch) {
-      ccliMeta.songNumber = ccliMatch[2];
-      return;
-    }
-    if (!ccliMeta.authors.length && line.includes(',') && !/ccli|songselect|www\./i.test(line)) {
-      ccliMeta.authors = line.split(',').map((part) => part.trim()).filter(Boolean);
-      return;
-    }
-    if (!ccliMeta.publisher && /publisher|publishing/i.test(line)) {
-      ccliMeta.publisher = line;
-      return;
-    }
-    if (!ccliMeta.copyright && /(public domain|copyright|©|\(c\))/i.test(line)) {
-      ccliMeta.copyright = line;
-    }
-  });
-
-  song.ccli = {
-    songNumber: ccliMeta.songNumber || song.ccli.songNumber || '',
-    authors: ccliMeta.authors.length ? ccliMeta.authors : song.ccli.authors || [],
-    publisher: ccliMeta.publisher || song.ccli.publisher || '',
-    copyright: ccliMeta.copyright || song.ccli.copyright || ''
-  };
+  song.ccli = parseCcliMetadata(parsed.metadataLines, song.ccli);
 
   const sections = parsed.sections.length ? parsed.sections : [{ header: 'Lyrics', lines: [] }];
   sections.forEach((section, index) => {
@@ -2710,20 +3102,330 @@ async function importLyricsFromFile(filePath, options = {}) {
   }
 }
 
+function decodeXmlEntities(value = '') {
+  return value
+    .replace(/&#x([0-9a-fA-F]+);/g, (_match, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_match, num) => String.fromCodePoint(Number(num)))
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, '\'')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+function extractSlideTextLinesFromParagraphs(paragraphs) {
+  const lines = [];
+  const collect = (node, buffer) => {
+    if (!node) {
+      return;
+    }
+    if (node.nodeType === 1) {
+      const local = node.localName;
+      if (local === 't') {
+        buffer.push(node.textContent || '');
+        return;
+      }
+      if (local === 'br') {
+        buffer.push('\n');
+        return;
+      }
+    }
+    if (node.childNodes && node.childNodes.length) {
+      node.childNodes.forEach((child) => collect(child, buffer));
+    }
+  };
+  paragraphs.forEach((pNode) => {
+    const buffer = [];
+    collect(pNode, buffer);
+    if (buffer.length > 0) {
+      const text = buffer.join('');
+      text.split(/\r?\n/).forEach((line) => lines.push(line));
+    }
+  });
+  return lines;
+}
+
+function extractSlideTextBlocks(xml = '') {
+  const blocks = [];
+  if (!xml) {
+    return blocks;
+  }
+  if (typeof DOMParser !== 'undefined') {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(xml, 'application/xml');
+    const parseErrors = doc.getElementsByTagName('parsererror');
+    if (!parseErrors || parseErrors.length === 0) {
+      const presentationNs = 'http://schemas.openxmlformats.org/presentationml/2006/main';
+      const drawingNs = 'http://schemas.openxmlformats.org/drawingml/2006/main';
+      const shapes = Array.from(doc.getElementsByTagNameNS(presentationNs, 'sp'));
+      shapes.forEach((shape) => {
+        const txBody = shape.getElementsByTagNameNS(presentationNs, 'txBody')[0];
+        if (!txBody) {
+          return;
+        }
+        let paragraphs = Array.from(txBody.getElementsByTagNameNS(drawingNs, 'p'));
+        if (paragraphs.length === 0) {
+          paragraphs = Array.from(txBody.getElementsByTagName('a:p'));
+        }
+        const lines = extractSlideTextLinesFromParagraphs(paragraphs);
+        if (lines.length === 0) {
+          return;
+        }
+        let placeholderType = null;
+        const ph = shape.getElementsByTagNameNS(presentationNs, 'ph')[0];
+        if (ph) {
+          placeholderType = ph.getAttribute('type') || null;
+        }
+        blocks.push({ type: placeholderType, lines });
+      });
+      return blocks;
+    }
+  }
+  const lines = [];
+  const paragraphRegex = /<a:p[^>]*>([\s\S]*?)<\/a:p>/g;
+  let paragraphMatch = null;
+  while ((paragraphMatch = paragraphRegex.exec(xml))) {
+    const paragraphXml = paragraphMatch[1];
+    const tokens = [];
+    const tokenRegex = /<a:t[^>]*>([\s\S]*?)<\/a:t>|<a:br\s*\/?>/g;
+    let tokenMatch = null;
+    while ((tokenMatch = tokenRegex.exec(paragraphXml))) {
+      if (tokenMatch[0].startsWith('<a:br')) {
+        tokens.push('\n');
+      } else {
+        tokens.push(decodeXmlEntities(tokenMatch[1] || ''));
+      }
+    }
+    if (tokens.length > 0) {
+      const text = tokens.join('');
+      text.split(/\r?\n/).forEach((line) => lines.push(line));
+    }
+  }
+  if (lines.length > 0) {
+    blocks.push({ type: null, lines });
+  }
+  return blocks;
+}
+
+function normalizePowerPointLines(lines = []) {
+  return lines
+    .map((line) => (line || '').trim())
+    .filter((line) => line.length > 0);
+}
+
+function parsePowerPointSlides(slideBlocks = []) {
+  if (!slideBlocks.length) {
+    return null;
+  }
+  const metadataSet = new Set();
+  const slides = [];
+  const firstBlocks = (slideBlocks[0] || []).map((block) => ({
+    type: block.type || null,
+    lines: normalizePowerPointLines(block.lines || [])
+  }));
+  const titleBlock = firstBlocks.find((block) => block.type === 'title' || block.type === 'ctrTitle')
+    || firstBlocks.find((block) => block.type && /title/i.test(block.type));
+  const metadataBlocks = new Set();
+  firstBlocks.forEach((block) => {
+    if (block.lines.length === 0) {
+      return;
+    }
+    const hasMeta = block.lines.some((line) => isMetadataLine(line, false, true));
+    if (hasMeta) {
+      metadataBlocks.add(block);
+      block.lines.forEach((line) => metadataSet.add(line));
+    }
+  });
+
+  let title = '';
+  if (titleBlock && titleBlock.lines.length > 0) {
+    title = titleBlock.lines.join(' ').trim();
+  }
+
+  const firstSlideLines = [];
+  firstBlocks.forEach((block) => {
+    if (metadataBlocks.has(block) || block === titleBlock) {
+      return;
+    }
+    firstSlideLines.push(...block.lines);
+  });
+
+  if (!title && firstSlideLines.length > 0) {
+    title = firstSlideLines.shift();
+  }
+
+  slides.push(firstSlideLines);
+
+  for (let index = 1; index < slideBlocks.length; index += 1) {
+    const blocks = (slideBlocks[index] || []).map((block) => ({
+      type: block.type || null,
+      lines: normalizePowerPointLines(block.lines || [])
+    }));
+    if (blocks.length === 0) {
+      continue;
+    }
+    const slideLyrics = [];
+    blocks.forEach((block) => {
+      if (block.lines.length === 0) {
+        return;
+      }
+      const hasMeta = block.lines.some((line) => isMetadataLine(line, false, false));
+      if (hasMeta) {
+        block.lines.forEach((line) => metadataSet.add(line));
+        return;
+      }
+      slideLyrics.push(...block.lines);
+    });
+    if (slideLyrics.length > 0) {
+      slides.push(slideLyrics);
+    }
+  }
+
+  return {
+    title,
+    slides,
+    metadataLines: Array.from(metadataSet)
+  };
+}
+
+async function readPowerPointFileData(file) {
+  if (!file) {
+    return null;
+  }
+  if (file.arrayBuffer) {
+    return await file.arrayBuffer();
+  }
+  const filePath = typeof file === 'string' ? file : file.path;
+  if (filePath && window.require) {
+    const fs = window.require('fs');
+    return await fs.promises.readFile(filePath);
+  }
+  return null;
+}
+
+async function loadPowerPointSlides(file) {
+  const filePath = typeof file === 'string' ? file : file?.path;
+  if (window.api && window.api.readPptxSlides && filePath) {
+    const xmlSlides = await window.api.readPptxSlides(filePath);
+    return xmlSlides.map((xml) => extractSlideTextBlocks(xml));
+  }
+  const data = await readPowerPointFileData(file);
+  if (!data) {
+    return [];
+  }
+  if (!window.require) {
+    return [];
+  }
+  const JSZip = window.require('jszip');
+  const zip = await JSZip.loadAsync(data);
+  const fileEntries = Object.keys(zip.files).map((path) => ({
+    path,
+    normalized: path.replace(/\\/g, '/')
+  }));
+  let slideEntries = fileEntries.filter(({ normalized }) => /ppt\/slides\/slide\d+\.xml$/i.test(normalized));
+  if (slideEntries.length === 0) {
+    slideEntries = fileEntries.filter(
+      ({ normalized }) =>
+        /ppt\/slides\/[^/]+\.xml$/i.test(normalized) && !/ppt\/slides\/_rels\//i.test(normalized)
+    );
+  }
+  slideEntries.sort((a, b) => {
+    const aMatch = a.normalized.match(/slide(\d+)\.xml$/i);
+    const bMatch = b.normalized.match(/slide(\d+)\.xml$/i);
+    const aIndex = aMatch ? Number(aMatch[1]) : 0;
+    const bIndex = bMatch ? Number(bMatch[1]) : 0;
+    return aIndex - bIndex;
+  });
+  const slides = [];
+  for (const entry of slideEntries) {
+    const xml = await zip.file(entry.path).async('string');
+    slides.push(extractSlideTextBlocks(xml));
+  }
+  return slides;
+}
+
+function applyPowerPointImport(parsed, options = {}) {
+  if (!parsed) {
+    return;
+  }
+  const forceNew = options.forceNew !== false;
+  let song = forceNew ? null : getSelectedSong();
+  if (!song) {
+    song = createSong('New Song');
+    song.theme = getDefaultTheme();
+    song.slides = [];
+    state.project.songs[song.id] = song;
+    state.project.setlist.push(song.id);
+  } else {
+    song.slides = [];
+  }
+
+  if (parsed.title) {
+    song.title = parsed.title;
+  }
+
+  song.ccli = parseCcliMetadata(parsed.metadataLines, song.ccli);
+
+  const pptSlides = parsed.slides.length ? parsed.slides : [[]];
+  pptSlides.forEach((lines, index) => {
+    const lyrics = lines.join('\n').trim();
+    const label = `Slide ${index + 1}`;
+    const isFirst = index === 0;
+    const slide = createSlide({
+      label,
+      titleText: isFirst ? song.title : '',
+      lyricsText: lyrics,
+      footerAutoCcli: isFirst
+    });
+    slide.showTitle = isFirst;
+    slide.showLyrics = true;
+    slide.showFooter = isFirst;
+    if (!isFirst) {
+      slide.footerAutoCcli = false;
+    }
+    song.slides.push(slide);
+  });
+
+  const ccliFooter = buildCcliFooter(song);
+  song.slides.forEach((slide) => {
+    if (slide.footerAutoCcli) {
+      slide.footerText = richTextFromPlain(ccliFooter);
+    }
+  });
+
+  state.selectedSongId = song.id;
+  state.selectedSlideIndex = 0;
+  state.selectedSection = 'setlist';
+  state.preview = { section: 'setlist', songId: song.id, slideIndex: 0 };
+  refreshAll();
+  saveProjectIfPossible();
+}
+
+async function importPowerPointFromFile(file, options = {}) {
+  try {
+    const slides = await loadPowerPointSlides(file);
+    if (!slides.length) {
+      window.alert('No slides found in the PowerPoint file.');
+      return;
+    }
+    const parsed = parsePowerPointSlides(slides);
+    if (!parsed) {
+      window.alert('No text found in the PowerPoint file.');
+      return;
+    }
+    applyPowerPointImport(parsed, options);
+  } catch (error) {
+    console.error('Failed to import PowerPoint file', error);
+    window.alert('Failed to import PowerPoint file. Check the console for details.');
+  }
+}
+
 async function importLyrics() {
   const filePath = await pickLyricsPath();
   if (!filePath) {
     return;
   }
-  const song = getSelectedSong();
-  let forceNew = false;
-  if (song && song.slides && song.slides.length > 0) {
-    const replace = window.confirm(
-      'Import into the selected song? This will replace its slides.\n\nClick Cancel to create a new song.'
-    );
-    forceNew = !replace;
-  }
-  await importLyricsFromFile(filePath, { forceNew });
+  await importLyricsFromFile(filePath, { forceNew: true });
 }
 
 function applyBackgroundFromLibraryPath(relativePath) {
@@ -2874,9 +3576,24 @@ function updateCcli() {
 }
 
 function updateAnnouncementSettings() {
-  state.project.announcements.autoAdvanceEnabled = elements.announcementAuto.checked;
+  const loopEnabled = elements.announcementLoop.checked;
+  state.project.announcements.autoAdvanceEnabled = loopEnabled;
   state.project.announcements.autoAdvanceSec = Number(elements.announcementAdvance.value) || 15;
-  state.project.announcements.loop = elements.announcementLoop.checked;
+  state.project.announcements.loop = loopEnabled;
+  elements.announcementAdvance.disabled = !loopEnabled;
+  if (state.live.section === 'announcements') {
+    updateAutoAdvanceTimers();
+  }
+  saveProjectIfPossible();
+}
+
+function updateAnnouncementSlideSettings() {
+  const slide = getSelectedAnnouncementSlide();
+  if (!slide) {
+    return;
+  }
+  slide.hideDuringLoop = elements.announcementHideLoop.checked;
+  renderAnnouncements();
   if (state.live.section === 'announcements') {
     updateAutoAdvanceTimers();
   }
@@ -3024,11 +3741,9 @@ function advanceLive(options = {}) {
   }
   if (selection.section === 'announcements') {
     const slides = state.project.announcements.slides || [];
-    if (selection.slideIndex < slides.length - 1) {
-      state.live.slideIndex += 1;
-    } else if (state.project.announcements.loop) {
-      state.live.slideIndex = 0;
-    }
+    const loopEnabled = state.project.announcements.loop === true;
+    const nextIndex = getNextAnnouncementIndex(state.live.slideIndex, slides, loopEnabled);
+    state.live.slideIndex = nextIndex;
     if (state.followLive) {
       state.selectedSection = 'announcements';
       state.selectedAnnouncementIndex = state.live.slideIndex;
@@ -3100,12 +3815,10 @@ function previousLive() {
     return;
   }
   if (selection.section === 'announcements') {
-    if (selection.slideIndex > 0) {
-      state.live.slideIndex -= 1;
-    } else if (state.project.announcements.loop) {
-      const slides = state.project.announcements.slides || [];
-      state.live.slideIndex = slides.length > 0 ? slides.length - 1 : 0;
-    }
+    const slides = state.project.announcements.slides || [];
+    const loopEnabled = state.project.announcements.loop === true;
+    const prevIndex = getPreviousAnnouncementIndex(state.live.slideIndex, slides, loopEnabled);
+    state.live.slideIndex = prevIndex;
     if (state.followLive) {
       state.selectedSection = 'announcements';
       state.selectedAnnouncementIndex = state.live.slideIndex;
@@ -3172,7 +3885,16 @@ function previousLive() {
 function goLive(options = {}) {
   const usePreviewIndex = options.usePreviewIndex === true;
   const section = state.selectedSection || 'setlist';
-  let slideIndex = usePreviewIndex ? state.preview.slideIndex : 0;
+  let slideIndex = 0;
+  if (usePreviewIndex) {
+    slideIndex = state.preview.slideIndex;
+  } else if (section === 'setlist') {
+    slideIndex = state.selectedSlideIndex;
+  } else if (section === 'announcements') {
+    slideIndex = state.selectedAnnouncementIndex;
+  } else if (section === 'timer') {
+    slideIndex = state.selectedTimerIndex;
+  }
   let songId = null;
 
   if (section === 'setlist') {
@@ -3218,11 +3940,7 @@ function goLive(options = {}) {
     document.activeElement.blur();
   }
   if (window.api && window.api.showProgram) {
-    if (state.displayId != null) {
-      window.api.showProgram(state.displayId);
-    } else {
-      window.api.showProgram(null);
-    }
+    window.api.showProgram(state.displayTarget ?? null);
     window.setTimeout(sendProgramState, 300);
   }
   state.live = { section, songId, slideIndex };
@@ -3279,18 +3997,54 @@ function togglePanic() {
   sendProgramState();
 }
 
-async function refreshDisplays() {
+async function refreshDisplays(options = {}) {
+  const skipSetProgramDisplay = options.skipSetProgramDisplay === true;
+  if (!window.api || !window.api.listDisplays) {
+    return;
+  }
   const displays = await window.api.listDisplays();
+  const previousSelection = state.displayTarget;
   elements.displaySelect.innerHTML = '';
+  const hasExternalDisplays = displays.length > 1;
+  const externalOption = document.createElement('option');
+  externalOption.value = DISPLAY_TARGET_ALL_EXTERNAL;
+  externalOption.textContent = hasExternalDisplays
+    ? 'All External Displays'
+    : 'All External Displays (operator only)';
+  elements.displaySelect.appendChild(externalOption);
   displays.forEach((display) => {
     const option = document.createElement('option');
     option.value = String(display.id);
     option.textContent = display.label;
     elements.displaySelect.appendChild(option);
   });
-  if (displays.length > 0) {
-    state.displayId = displays[0].id;
-    elements.displaySelect.value = String(state.displayId);
+  if (displays.length === 0) {
+    state.displayTarget = null;
+    if (!skipSetProgramDisplay && window.api && window.api.setProgramDisplay) {
+      window.api.setProgramDisplay(null);
+    }
+    return;
+  }
+  const displayIdSet = new Set(displays.map((display) => String(display.id)));
+  const previousValue = previousSelection === DISPLAY_TARGET_ALL_EXTERNAL
+    ? DISPLAY_TARGET_ALL_EXTERNAL
+    : (previousSelection != null ? String(previousSelection) : null);
+  let nextValue = previousValue;
+  if (!nextValue) {
+    nextValue = DISPLAY_TARGET_ALL_EXTERNAL;
+  }
+  const isMissingDisplay = nextValue !== DISPLAY_TARGET_ALL_EXTERNAL && !displayIdSet.has(nextValue);
+  if (isMissingDisplay) {
+    const missingOption = document.createElement('option');
+    missingOption.value = nextValue;
+    missingOption.textContent = `Missing display (${nextValue})`;
+    missingOption.disabled = true;
+    elements.displaySelect.appendChild(missingOption);
+  }
+  state.displayTarget = nextValue;
+  elements.displaySelect.value = nextValue;
+  if (!skipSetProgramDisplay && window.api && window.api.setProgramDisplay && previousSelection !== nextValue) {
+    window.api.setProgramDisplay(nextValue);
   }
 }
 
@@ -3335,7 +4089,59 @@ async function openProject() {
   setProject(payload.project, payload.filePath || null, null);
 }
 
+function sendEditCommand(command) {
+  if (window.api && window.api.editCommand) {
+    window.api.editCommand(command);
+    return;
+  }
+  if (document && document.execCommand) {
+    document.execCommand(command);
+  }
+}
+
 function handleKeydown(event) {
+  if (event.defaultPrevented) {
+    return;
+  }
+  const key = event.key ? event.key.toLowerCase() : '';
+  const hasModifier = event.ctrlKey || event.metaKey;
+  if (hasModifier) {
+    if (key === 's') {
+      event.preventDefault();
+      saveProject();
+      return;
+    }
+    if (key === 'z') {
+      event.preventDefault();
+      sendEditCommand(event.shiftKey ? 'redo' : 'undo');
+      return;
+    }
+    if (key === 'y') {
+      event.preventDefault();
+      sendEditCommand('redo');
+      return;
+    }
+    if (key === 'a') {
+      event.preventDefault();
+      sendEditCommand('selectAll');
+      return;
+    }
+    if (key === 'x') {
+      event.preventDefault();
+      sendEditCommand('cut');
+      return;
+    }
+    if (key === 'c') {
+      event.preventDefault();
+      sendEditCommand('copy');
+      return;
+    }
+    if (key === 'v') {
+      event.preventDefault();
+      sendEditCommand('paste');
+      return;
+    }
+  }
   const tag = event.target.tagName.toLowerCase();
   const isTyping = tag === 'input' || tag === 'textarea' || event.target.isContentEditable;
   if (isTyping) {
@@ -3379,9 +4185,6 @@ function handleKeydown(event) {
   } else if (event.code === 'F11') {
     event.preventDefault();
     window.api.toggleProgramFullscreen();
-  } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
-    event.preventDefault();
-    saveProject();
   }
 }
 
@@ -3450,7 +4253,7 @@ function bindEvents() {
     elements.openAnnouncementLibrary.addEventListener('click', () => openLibrary('announcements', 'announcements'));
   }
   if (elements.openTimerLibrary) {
-    elements.openTimerLibrary.addEventListener('click', () => openLibrary('background', 'timer'));
+    elements.openTimerLibrary.addEventListener('click', () => openLibrary('timer', 'timer'));
   }
   if (elements.uploadAnnouncement) {
     elements.uploadAnnouncement.addEventListener('click', pickAnnouncementMedia);
@@ -3519,14 +4322,14 @@ function bindEvents() {
     elements.ccliCopyright
   ].forEach((input) => input.addEventListener('input', updateCcli));
 
-  if (elements.announcementAuto) {
-    elements.announcementAuto.addEventListener('change', updateAnnouncementSettings);
-  }
   if (elements.announcementAdvance) {
     elements.announcementAdvance.addEventListener('input', updateAnnouncementSettings);
   }
   if (elements.announcementLoop) {
     elements.announcementLoop.addEventListener('change', updateAnnouncementSettings);
+  }
+  if (elements.announcementHideLoop) {
+    elements.announcementHideLoop.addEventListener('change', updateAnnouncementSlideSettings);
   }
   if (elements.timerAutoVideo) {
     elements.timerAutoVideo.addEventListener('change', updateTimerSettings);
@@ -3540,11 +4343,7 @@ function bindEvents() {
 
   if (elements.showProgram) {
     elements.showProgram.addEventListener('click', () => {
-      if (state.displayId != null) {
-        window.api.showProgram(state.displayId);
-      } else {
-        window.api.showProgram(null);
-      }
+      window.api.showProgram(state.displayTarget ?? null);
       sendProgramState();
       window.setTimeout(sendProgramState, 300);
       updateAutoAdvanceTimers();
@@ -3580,21 +4379,23 @@ function bindEvents() {
     state.autoGoLive = event.target.checked;
   });
   if (elements.followLive) {
-    elements.followLive.addEventListener('change', (event) => {
-      state.followLive = event.target.checked;
-    });
+  elements.followLive.addEventListener('change', (event) => {
+    state.followLive = event.target.checked;
+  });
+  elements.followLive.checked = state.followLive;
   }
-  if (elements.announcementAuto) {
-    elements.announcementAuto.addEventListener('change', () => {
+  if (elements.announcementLoop) {
+    elements.announcementLoop.addEventListener('change', () => {
       if (elements.announcementAdvance) {
-        elements.announcementAdvance.disabled = !elements.announcementAuto.checked;
+        elements.announcementAdvance.disabled = !elements.announcementLoop.checked;
       }
     });
   }
 
   elements.displaySelect.addEventListener('change', (event) => {
-    state.displayId = Number(event.target.value);
-    window.api.setProgramDisplay(state.displayId);
+    const value = event.target.value;
+    state.displayTarget = value;
+    window.api.setProgramDisplay(state.displayTarget);
   });
 
   document.addEventListener('keydown', handleKeydown);
@@ -3723,6 +4524,26 @@ refreshDisplays();
 refreshAll();
 setThemeSectionCollapsed(false);
 setCcliSectionCollapsed(true);
+applyVersionLabel();
+
+if (window.api && window.api.ensureLibraryRoots) {
+  window.api.ensureLibraryRoots().then(() => {
+    refreshAll();
+    sendProgramStateIfLive();
+  });
+}
+
+if (window.api && window.api.onDisplayChanged) {
+  window.api.onDisplayChanged((payload) => {
+    if (payload && payload.target != null) {
+      const normalized = String(payload.target);
+      if (state.displayTarget !== normalized) {
+        state.displayTarget = normalized;
+      }
+    }
+    refreshDisplays({ skipSetProgramDisplay: true });
+  });
+}
 
 if (window.api && window.api.onLibrarySelected) {
   window.api.onLibrarySelected((payload) => {
@@ -3800,3 +4621,4 @@ window.addEventListener('resize', () => {
   updatePreviewScale();
   updatePreview();
 });
+

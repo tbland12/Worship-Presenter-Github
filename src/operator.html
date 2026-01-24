@@ -54,13 +54,13 @@
             <ul class="list" id="setlist"></ul>
             <div class="empty-hint" id="setlist-empty">
               <div>Add a song to start building the set.</div>
-              <div class="small">Tip: Drag and drop lyric text files to import.</div>
+              <div class="small">Tip: Drag and drop lyric text, PowerPoint, or image files to import.</div>
             </div>
           </div>
         </section>
 
         <section class="panel editor-panel">
-          <h3>Song Editor</h3>
+          <h3 id="editor-title">Song Editor</h3>
           <div class="preview-wrap" id="preview-wrap">
             <div class="preview-card" id="preview-card">
               <div class="preview-stage" id="preview-stage"></div>
@@ -120,8 +120,8 @@
                 <span>Announcements</span>
                 <button id="add-announcement" type="button">Add Slide</button>
               </div>
-              <ul class="list media-list" id="announcements-preview-list"></ul>
-              <div class="empty-hint" id="announcements-preview-empty">Add announcement slides to show before service.</div>
+              <ul class="list media-list" id="announcements-list"></ul>
+              <div class="empty-hint" id="announcements-empty">Add announcement slides to show before service.</div>
             </div>
           </div>
 
@@ -162,12 +162,6 @@
               </div>
               <div class="small" id="announcement-path">No announcement selected</div>
             </div>
-            <div class="form-row form-row-inline">
-              <label class="toggle-inline">
-                <input id="announcement-auto" type="checkbox" />
-                Auto-advance
-              </label>
-            </div>
             <div class="form-row">
               <label for="announcement-advance">Auto-advance (sec)</label>
               <input id="announcement-advance" type="number" min="3" max="120" />
@@ -175,7 +169,13 @@
             <div class="form-row form-row-inline">
               <label class="toggle-inline">
                 <input id="announcement-loop" type="checkbox" />
-                Loop announcements
+                Auto-advance + loop
+              </label>
+            </div>
+            <div class="form-row form-row-inline">
+              <label class="toggle-inline">
+                <input id="announcement-hide-loop" type="checkbox" />
+                Hide during loop
               </label>
             </div>
           </div>
@@ -364,8 +364,8 @@
 
     <div class="drop-overlay" id="drop-overlay" hidden>
       <div class="drop-card">
-        <div class="drop-title">Drop lyric text files</div>
-        <div class="drop-sub">Creates a new song for each .txt file</div>
+        <div class="drop-title">Drop lyric text, PowerPoint, or image files</div>
+        <div class="drop-sub">Creates a new song for each .txt or .pptx file (images follow selection)</div>
       </div>
     </div>
 

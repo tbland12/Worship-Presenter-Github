@@ -7,6 +7,7 @@ const elements = {
   empty: document.getElementById('library-empty'),
   path: document.getElementById('library-path'),
   refresh: document.getElementById('refresh-library'),
+  importPack: document.getElementById('import-pack'),
   close: document.getElementById('close-library'),
   filterAll: document.getElementById('filter-all'),
   filterImages: document.getElementById('filter-images'),
@@ -68,9 +69,12 @@ function renderItem(item) {
   card.addEventListener('click', () => {
     if (window.api && window.api.selectLibraryItem) {
       const normalized = item.relativePath.replace(/\\/g, '/');
-      const scoped = libraryScope === 'announcements'
-        ? `Announcements/${normalized.replace(/^Announcements\//i, '')}`
-        : normalized;
+      let scoped = normalized;
+      if (libraryScope === 'announcements') {
+        scoped = `Announcements/${normalized.replace(/^Announcements\//i, '')}`;
+      } else if (libraryScope === 'timer') {
+        scoped = `Timers/${normalized.replace(/^Timers\//i, '')}`;
+      }
       const relativePath = `library/${scoped}`;
       window.api.selectLibraryItem({ scope: libraryScope, sourcePath: relativePath });
     }
@@ -118,7 +122,54 @@ function setFilter(mode) {
   renderLibrary();
 }
 
+function updateImportPackVisibility() {
+  if (!elements.importPack) {
+    return;
+  }
+  elements.importPack.hidden = libraryScope !== 'background';
+}
+
+async function importContentPack() {
+  if (!elements.importPack) {
+    return;
+  }
+  if (!window.api || !window.api.importContentPack) {
+    window.alert('Content pack import is unavailable.');
+    return;
+  }
+  const originalLabel = elements.importPack.textContent;
+  elements.importPack.disabled = true;
+  elements.importPack.textContent = 'Importing...';
+  try {
+    const result = await window.api.importContentPack();
+    if (!result || result.canceled) {
+      return;
+    }
+    if (result.error) {
+      window.alert(result.error);
+      return;
+    }
+    const imported = Number(result.imported) || 0;
+    const skipped = Number(result.skipped) || 0;
+    const failed = Number(result.failed) || 0;
+    const renamed = Number(result.renamed) || 0;
+    const name = result.packName ? ` "${result.packName}"` : '';
+    window.alert(
+      `Content pack${name} imported.\n\nImported: ${imported}\nSkipped: ${skipped}\nRenamed: ${renamed}\nFailed: ${failed}`
+    );
+    if (imported > 0 || renamed > 0) {
+      await loadLibrary();
+    }
+  } finally {
+    elements.importPack.disabled = false;
+    elements.importPack.textContent = originalLabel;
+  }
+}
+
 elements.refresh.addEventListener('click', loadLibrary);
+if (elements.importPack) {
+  elements.importPack.addEventListener('click', importContentPack);
+}
 elements.close.addEventListener('click', () => {
   if (window.api && window.api.closeLibrary) {
     window.api.closeLibrary();
@@ -142,6 +193,7 @@ if (window.api && window.api.onLibraryScope) {
     } else if (elements.filters) {
       elements.filters.style.display = '';
     }
+    updateImportPackVisibility();
     loadLibrary();
   });
 }
@@ -152,4 +204,5 @@ if (libraryScope === 'announcements') {
     elements.filters.style.display = 'none';
   }
 }
+updateImportPackVisibility();
 loadLibrary();

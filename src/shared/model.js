@@ -54,7 +54,7 @@ export function createNewProject() {
     announcements: {
       slides: [],
       autoAdvanceSec: 15,
-      loop: false,
+      loop: true,
       autoAdvanceEnabled: true
     },
     timer: {
@@ -110,12 +110,18 @@ export function createSlide({
   };
 }
 
-export function createMediaSlide({ label = 'Slide', mediaPath = '', mediaType = 'image' } = {}) {
+export function createMediaSlide({
+  label = 'Slide',
+  mediaPath = '',
+  mediaType = 'image',
+  hideDuringLoop = false
+} = {}) {
   return {
     id: `media-${crypto.randomUUID()}`,
     label,
     mediaPath,
-    mediaType
+    mediaType,
+    hideDuringLoop: Boolean(hideDuringLoop)
   };
 }
 

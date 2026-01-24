@@ -24,10 +24,14 @@
 .stage-bg-image {
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  object-fit: contain;
 }
 
 .stage-bg-video {
+  background: #000000;
+}
+
+.stage-bg-image {
   background: #000000;
 }
 

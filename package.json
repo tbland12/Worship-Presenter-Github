@@ -1,6 +1,6 @@
 {
   "name": "worship-presenter",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "Offline Windows worship lyrics presenter",
   "author": "Tyler Bland",
   "main": "main.js",
@@ -12,10 +12,13 @@
     "publish": "electron-forge publish"
   },
   "devDependencies": {
-    "electron": "^30.0.0",
     "@electron-forge/cli": "^7.5.0",
     "@electron-forge/maker-squirrel": "^7.5.0",
     "@electron-forge/maker-zip": "^7.5.0",
-    "@electron-forge/publisher-github": "^7.5.0"
+    "@electron-forge/publisher-github": "^7.5.0",
+    "electron": "^30.0.0"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
   }
 }

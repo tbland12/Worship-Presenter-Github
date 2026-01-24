@@ -10,7 +10,47 @@
   try {
     const { ipcRenderer } = window.require('electron');
     const path = window.require('path');
+    const fssync = window.require('fs');
     const { pathToFileURL } = window.require('url');
+    function resolveBundledLibraryRoot() {
+      const candidates = [];
+      if (process.resourcesPath) {
+        candidates.push(path.join(process.resourcesPath, 'library'));
+      }
+      candidates.push(path.join(__dirname, 'library'));
+      for (const candidate of candidates) {
+        if (candidate && fssync.existsSync(candidate)) {
+          return candidate;
+        }
+      }
+      return candidates[0] || '';
+    }
+
+    let libraryRoot = '';
+    let bundledLibraryRoot = resolveBundledLibraryRoot();
+    let libraryRootsPromise = null;
+
+    async function refreshLibraryRoots() {
+      if (libraryRootsPromise) {
+        return libraryRootsPromise;
+      }
+      libraryRootsPromise = (async () => {
+        try {
+          const roots = await ipcRenderer.invoke('library:roots');
+          if (roots && typeof roots === 'object') {
+            libraryRoot = roots.libraryRoot || libraryRoot;
+            bundledLibraryRoot = roots.bundledLibraryRoot || bundledLibraryRoot;
+          }
+        } catch (error) {
+          // Ignore and use fallbacks.
+          libraryRootsPromise = null;
+        }
+        return { libraryRoot, bundledLibraryRoot };
+      })();
+      return libraryRootsPromise;
+    }
+
+    refreshLibraryRoots();
 
     function resolveMediaUrl(projectFolder, relativePath) {
       if (!projectFolder || !relativePath) {
@@ -29,9 +69,11 @@
       saveProjectFile: (filePath, project, options = {}) => ipcRenderer.invoke('project:save-file', filePath, project, options),
       pickLyrics: () => ipcRenderer.invoke('lyrics:pick'),
       readTextFile: (filePath) => ipcRenderer.invoke('file:read-text', filePath),
+      editCommand: (command) => ipcRenderer.send('edit:command', command),
       pickMedia: () => ipcRenderer.invoke('media:pick'),
       importMedia: (projectFolder, sourcePath) => ipcRenderer.invoke('media:import', projectFolder, sourcePath),
       importLibrary: (sourcePath) => ipcRenderer.invoke('library:import', sourcePath),
+      importContentPack: () => ipcRenderer.invoke('content-pack:import'),
       importAnnouncement: (sourcePath) => ipcRenderer.invoke('announcement:import', sourcePath),
       pickAnnouncement: () => ipcRenderer.invoke('announcement:pick'),
       openLibrary: (options = {}) => ipcRenderer.send('library:open', options),
@@ -42,12 +84,14 @@
       onLibraryScope: (callback) => ipcRenderer.on('library:scope', (_event, scope) => callback(scope)),
       checkAssets: (payload) => ipcRenderer.invoke('assets:check', payload),
       onMenuAction: (callback) => ipcRenderer.on('menu:action', (_event, action) => callback(action)),
+      ensureLibraryRoots: () => refreshLibraryRoots(),
       resolveLibraryUrl: (relativePath) => {
         if (!relativePath) {
           return '';
         }
         const cleaned = relativePath.replace(/^library[\\/]/, '');
-        const absolutePath = path.join(__dirname, 'library', cleaned);
+        const basePath = libraryRoot || bundledLibraryRoot || path.join(__dirname, 'library');
+        const absolutePath = path.join(basePath, cleaned);
         return pathToFileURL(absolutePath).toString();
       },
       listDisplays: () => ipcRenderer.invoke('display:list'),
@@ -59,7 +103,9 @@
       sendProgramEvent: (payload) => ipcRenderer.send('program:event', payload),
       onProgramState: (callback) => ipcRenderer.on('program:state', (_event, state) => callback(state)),
       onProgramEvent: (callback) => ipcRenderer.on('program:event', (_event, payload) => callback(payload)),
-      resolveMediaUrl
+      onDisplayChanged: (callback) => ipcRenderer.on('display:changed', (_event, payload) => callback(payload)),
+      resolveMediaUrl,
+      getAppVersion: () => ipcRenderer.invoke('app:get-version')
     };
 
     window.api = api;

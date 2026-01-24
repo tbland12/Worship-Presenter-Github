@@ -7,7 +7,14 @@ body {
   overflow: hidden;
 }
 
+body {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 #program-stage {
-  width: 100%;
-  height: 100%;
+  width: min(100vw, calc(100vh * 16 / 9));
+  height: min(100vh, calc(100vw * 9 / 16));
+  flex: 0 0 auto;
 }

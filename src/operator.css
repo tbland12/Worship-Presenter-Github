@@ -301,6 +301,22 @@ textarea {
   display: block;
 }
 
+.list-item.loop-hidden .media-thumb {
+  opacity: 0.65;
+}
+
+.media-flag {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: rgba(13, 17, 22, 0.8);
+  color: var(--muted);
+  font-size: 10px;
+  letter-spacing: 0.02em;
+}
+
 .media-label {
   font-size: 11px;
   color: var(--muted);
@@ -314,7 +330,7 @@ textarea {
 }
 
 .list-item.dragging {
-  opacity: 0.6;
+  opacity: 0.65;
   border-color: var(--accent-2);
 }
 
@@ -324,6 +340,16 @@ textarea {
 
 .list-item.drag-over-after {
   transform: translateY(-6px);
+}
+
+#announcements-list .list-item.drag-over-before,
+#announcements-list .list-item.drag-over-after {
+  transform: none;
+}
+
+.drag-ghost {
+  opacity: 0.65;
+  border-color: var(--accent-2);
 }
 
 .list-item.active {
