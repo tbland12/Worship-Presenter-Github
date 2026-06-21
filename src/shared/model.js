@@ -44,7 +44,7 @@ const DEFAULT_THEME = {
 export function createNewProject() {
   return {
     schemaVersion: 2,
-    appVersion: '0.1.5',
+    appVersion: '0.1.6',
     settings: {
       aspectRatio: '16:9',
       textFadeMs: 200,

@@ -228,6 +228,7 @@ const DEFAULT_PREVIEW_SCALE = 0.7;
 const ADJACENT_PREVIEW_SCALE = 0.82;
 let previewObserver = null;
 let previewSplitState = null;
+let previewObservedWidth = 0;
 const SECTION_HEADER_REGEX = /^(verse|chorus|bridge|pre-chorus|prechorus|intro|outro|tag|refrain|ending|hook)(\s+\d+)?$/i;
 let announcementDragState = null;
 
@@ -502,6 +503,7 @@ function setPreviewCardHeight(height) {
   elements.previewCard.style.width = `${width}px`;
   elements.previewCard.style.height = `${finalHeight}px`;
   elements.previewWrap.style.height = `${finalHeight}px`;
+  elements.previewWrap.style.flexBasis = `${finalHeight}px`;
 
   const adjacentWidth = width * ADJACENT_PREVIEW_SCALE;
   const adjacentHeight = finalHeight * ADJACENT_PREVIEW_SCALE;
@@ -525,6 +527,18 @@ function setPreviewCardHeight(height) {
     previewSplitState.maxHeight = constraints.maxHeight;
     previewSplitState.minHeight = constraints.minHeight;
   }
+  if (elements.previewSplitter) {
+    elements.previewSplitter.setAttribute('aria-valuemin', String(Math.round(constraints.minHeight)));
+    elements.previewSplitter.setAttribute('aria-valuemax', String(Math.round(constraints.maxHeight)));
+    elements.previewSplitter.setAttribute('aria-valuenow', String(Math.round(finalHeight)));
+  }
+  return finalHeight;
+}
+
+function applyPreviewHeight(height) {
+  setPreviewCardHeight(height);
+  updatePreviewScale();
+  updatePreview();
 }
 
 function initPreviewSplitter() {
@@ -545,36 +559,59 @@ function initPreviewSplitter() {
   };
   setPreviewCardHeight(previewSplitState.height);
 
-  elements.previewSplitter.addEventListener('mousedown', (event) => {
+  elements.previewSplitter.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0) return;
     event.preventDefault();
     if (!previewSplitState) {
       return;
     }
     const startY = event.clientY;
     const startHeight = elements.previewCard.getBoundingClientRect().height;
+    const previousUserSelect = document.body.style.userSelect;
     elements.previewSplitter.classList.add('dragging');
+    elements.previewWrap.classList.add('is-resizing');
     document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+    elements.previewSplitter.setPointerCapture(event.pointerId);
 
     const handleMove = (moveEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
       const delta = moveEvent.clientY - startY;
       const next = Math.max(
         previewSplitState.minHeight,
         Math.min(previewSplitState.maxHeight, startHeight + delta)
       );
-      setPreviewCardHeight(next);
-      updatePreviewScale();
-      updatePreview();
+      applyPreviewHeight(next);
     };
 
-    const handleUp = () => {
+    const handleUp = (upEvent) => {
+      if (upEvent.pointerId !== event.pointerId) return;
       elements.previewSplitter.classList.remove('dragging');
+      elements.previewWrap.classList.remove('is-resizing');
       document.body.style.cursor = '';
-      window.removeEventListener('mousemove', handleMove);
-      window.removeEventListener('mouseup', handleUp);
+      document.body.style.userSelect = previousUserSelect;
+      if (elements.previewSplitter.hasPointerCapture(event.pointerId)) {
+        elements.previewSplitter.releasePointerCapture(event.pointerId);
+      }
+      elements.previewSplitter.removeEventListener('pointermove', handleMove);
+      elements.previewSplitter.removeEventListener('pointerup', handleUp);
+      elements.previewSplitter.removeEventListener('pointercancel', handleUp);
     };
 
-    window.addEventListener('mousemove', handleMove);
-    window.addEventListener('mouseup', handleUp);
+    elements.previewSplitter.addEventListener('pointermove', handleMove);
+    elements.previewSplitter.addEventListener('pointerup', handleUp);
+    elements.previewSplitter.addEventListener('pointercancel', handleUp);
+  });
+
+  elements.previewSplitter.addEventListener('keydown', (event) => {
+    if (!previewSplitState || !['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    let next = previewSplitState.height;
+    if (event.key === 'ArrowUp') next -= 16;
+    if (event.key === 'ArrowDown') next += 16;
+    if (event.key === 'Home') next = previewSplitState.minHeight;
+    if (event.key === 'End') next = previewSplitState.maxHeight;
+    applyPreviewHeight(next);
   });
 }
 
@@ -5144,21 +5181,20 @@ if (window.api?.onSaveBeforeClose) {
   });
 }
 
-if (window.ResizeObserver && elements.previewStage) {
-  previewObserver = new ResizeObserver(() => {
-    if (previewSplitState) {
-      setPreviewCardHeight(previewSplitState.height || 0);
-    }
+if (window.ResizeObserver && elements.previewWrap) {
+  previewObserver = new ResizeObserver((entries) => {
+    const width = entries[0]?.contentRect?.width || 0;
+    if (Math.abs(width - previewObservedWidth) < 0.5) return;
+    previewObservedWidth = width;
+    if (previewSplitState) setPreviewCardHeight(previewSplitState.height || 0);
     updatePreviewScale();
     updatePreview();
   });
-  previewObserver.observe(elements.previewStage);
-  if (elements.previewWrap) {
-    previewObserver.observe(elements.previewWrap);
-  }
+  previewObserver.observe(elements.previewWrap);
 }
 
 window.addEventListener('resize', () => {
+  if (previewSplitState) setPreviewCardHeight(previewSplitState.height || 0);
   updatePreviewScale();
   updatePreview();
 });

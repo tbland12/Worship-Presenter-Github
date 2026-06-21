@@ -201,7 +201,7 @@ function migrateProject(project) {
   const migrated = {
     ...source,
     schemaVersion: PROJECT_SCHEMA_VERSION,
-    appVersion: typeof source.appVersion === 'string' ? source.appVersion : '0.1.5',
+    appVersion: typeof source.appVersion === 'string' ? source.appVersion : '0.1.6',
     settings: source.settings && typeof source.settings === 'object' ? source.settings : {},
     announcements: {
       ...announcementSource,

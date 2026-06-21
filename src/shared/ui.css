@@ -143,6 +143,18 @@ textarea:disabled {
   height: 17px;
 }
 
+.appearance-icon-moon {
+  display: none;
+}
+
+.appearance-toggle[data-theme="light"] .appearance-icon-sun {
+  display: none;
+}
+
+.appearance-toggle[data-theme="light"] .appearance-icon-moon {
+  display: block;
+}
+
 .toast-region {
   position: fixed;
   right: 18px;

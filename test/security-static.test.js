@@ -25,6 +25,10 @@ test('operator and library use the shared accessible UI system', () => {
   const uiJs = read('src/shared/ui.js');
   const rendererJs = `${read('src/operator.js')}\n${read('src/library.js')}`;
   assert.match(operatorHtml, /id="appearance-toggle"/);
+  assert.match(operatorHtml, /appearance-icon-sun/);
+  assert.match(operatorHtml, /appearance-icon-moon/);
+  assert.match(libraryHtml, /appearance-icon-sun/);
+  assert.match(libraryHtml, /appearance-icon-moon/);
   assert.match(operatorHtml, /id="save-status"[^>]*role="status"/);
   assert.match(operatorHtml, /id="toast-region"[^>]*aria-live="polite"/);
   assert.match(libraryHtml, /id="library-search"/);
@@ -32,6 +36,7 @@ test('operator and library use the shared accessible UI system', () => {
   assert.match(uiCss, /:focus-visible/);
   assert.match(uiCss, /prefers-reduced-motion/);
   assert.match(uiJs, /worship-presenter-theme/);
+  assert.match(uiCss, /appearance-toggle\[data-theme="light"\] \.appearance-icon-moon/);
   assert.doesNotMatch(rendererJs, /window\.alert/);
 });
 
@@ -44,10 +49,15 @@ test('preview carousel and live slide visibility are wired', () => {
   assert.match(operatorCss, /preview-card-adjacent/);
   assert.match(operatorCss, /mask-image:\s*linear-gradient/);
   assert.match(operatorCss, /preview-wrap::before/);
+  assert.match(operatorCss, /\.preview-wrap[^}]*flex:\s*0 0 auto/s);
+  assert.match(operatorCss, /\.panel-splitter[^}]*flex:\s*0 0 11px/s);
   assert.match(operatorCss, /data-theme="light"[^}]*presenter-controls button\.primary/);
   assert.match(operatorJs, /DEFAULT_PREVIEW_SCALE = 0\.7/);
   assert.match(operatorJs, /function getAdjacentPreviewSelection/);
   assert.match(operatorJs, /function scrollLiveSlideIntoView\(\)/);
+  assert.match(operatorJs, /addEventListener\('pointerdown'/);
+  assert.match(operatorJs, /setPointerCapture\(event\.pointerId\)/);
+  assert.match(operatorJs, /aria-valuenow/);
   assert.match(operatorJs, /list\.scrollTo\(\{ top: Math\.max\(0, centeredTop\), behavior: 'smooth' \}\)/);
 });
 

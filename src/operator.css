@@ -1332,6 +1332,7 @@ body[data-live="true"] .status-pill { color: var(--live); }
 
 .preview-wrap {
   position: relative;
+  flex: 0 0 auto;
   min-height: 140px;
   align-items: center;
   overflow: hidden;
@@ -1366,6 +1367,10 @@ body[data-live="true"] .status-pill { color: var(--live); }
   transition: width 160ms ease, height 160ms ease, opacity 160ms ease;
 }
 
+.preview-wrap.is-resizing .preview-card {
+  transition: none;
+}
+
 .preview-card-adjacent {
   position: absolute;
   z-index: 1;
@@ -1398,11 +1403,33 @@ body[data-live="true"] .status-pill { color: var(--live); }
 }
 
 .panel-splitter {
+  position: relative;
+  z-index: 6;
+  flex: 0 0 11px;
   height: 9px;
   margin: 1px 0;
+  touch-action: none;
+  user-select: none;
+}
+
+.panel-splitter::after {
+  position: absolute;
+  inset: 4px 16%;
+  border-radius: 999px;
+  background: var(--panel-border);
+  content: "";
+  transition: background-color 140ms ease, inset 140ms ease;
+}
+
+.panel-splitter:hover::after,
+.panel-splitter:focus-visible::after,
+.panel-splitter.dragging::after {
+  inset-inline: 10%;
+  background: var(--accent);
 }
 
 .editor-section {
+  flex: 0 0 auto;
   padding: 2px;
 }
 
