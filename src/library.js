@@ -1,4 +1,5 @@
 import { ensureApiBridge } from './shared/bridge.js';
+import { createNotifier, initializeAppearance } from './shared/ui.js';
 
 const api = ensureApiBridge();
 
@@ -9,18 +10,27 @@ const elements = {
   refresh: document.getElementById('refresh-library'),
   importPack: document.getElementById('import-pack'),
   close: document.getElementById('close-library'),
+  search: document.getElementById('library-search'),
+  appearanceToggle: document.getElementById('appearance-toggle'),
   filterAll: document.getElementById('filter-all'),
   filterImages: document.getElementById('filter-images'),
   filterVideos: document.getElementById('filter-videos'),
+  filterAllCount: document.getElementById('filter-all-count'),
+  filterImagesCount: document.getElementById('filter-images-count'),
+  filterVideosCount: document.getElementById('filter-videos-count'),
   filters: document.querySelector('.library-filters')
 };
 
+initializeAppearance(elements.appearanceToggle);
+const notify = createNotifier(document.getElementById('toast-region'));
+
 let libraryItems = [];
 let filterMode = 'all';
+let searchQuery = '';
 let libraryScope = new URLSearchParams(window.location.search).get('scope') || 'background';
 
 function clearGrid() {
-  elements.grid.innerHTML = '';
+  elements.grid.replaceChildren();
 }
 
 function renderItem(item) {
@@ -88,15 +98,30 @@ async function loadLibrary() {
     elements.path.textContent = 'Library API not available.';
     return;
   }
-  const payload = await window.api.listLibraryItems({ scope: libraryScope });
-  elements.path.textContent = payload.folder || 'Library folder unavailable';
-  clearGrid();
-  libraryItems = payload.items || [];
-  renderLibrary();
+  elements.refresh.disabled = true;
+  elements.path.textContent = 'Loading media...';
+  try {
+    const payload = await window.api.listLibraryItems({ scope: libraryScope });
+    elements.path.textContent = payload.folder || 'Media Library';
+    clearGrid();
+    libraryItems = payload.items || [];
+    renderLibrary();
+  } catch (error) {
+    console.error('Failed to load library', error);
+    elements.path.textContent = 'Library unavailable';
+    notify({ type: 'error', title: 'Library unavailable', message: 'Media could not be loaded. Try refreshing.', timeout: 0 });
+  } finally {
+    elements.refresh.disabled = false;
+  }
 }
 
 function renderLibrary() {
   clearGrid();
+  const imageCount = libraryItems.filter((item) => item.type === 'image').length;
+  const videoCount = libraryItems.filter((item) => item.type === 'video').length;
+  elements.filterAllCount.textContent = String(libraryItems.length);
+  elements.filterImagesCount.textContent = String(imageCount);
+  elements.filterVideosCount.textContent = String(videoCount);
   const items = libraryItems.filter((item) => {
     if (filterMode === 'images') {
       return item.type === 'image';
@@ -105,9 +130,12 @@ function renderLibrary() {
       return item.type === 'video';
     }
     return true;
+  }).filter((item) => {
+    return !searchQuery || item.name.toLowerCase().includes(searchQuery);
   });
   if (items.length === 0) {
     elements.empty.style.display = 'block';
+    elements.empty.textContent = searchQuery ? `No media matches “${elements.search.value.trim()}”.` : 'No media matches this view.';
     return;
   }
   elements.empty.style.display = 'none';
@@ -134,7 +162,7 @@ async function importContentPack() {
     return;
   }
   if (!window.api || !window.api.importContentPack) {
-    window.alert('Content pack import is unavailable.');
+    notify({ type: 'error', title: 'Import unavailable', message: 'Content pack import is not available in this window.', timeout: 0 });
     return;
   }
   const originalLabel = elements.importPack.textContent;
@@ -146,7 +174,7 @@ async function importContentPack() {
       return;
     }
     if (result.error) {
-      window.alert(result.error);
+      notify({ type: 'error', title: 'Import failed', message: result.error, timeout: 0 });
       return;
     }
     const imported = Number(result.imported) || 0;
@@ -154,9 +182,12 @@ async function importContentPack() {
     const failed = Number(result.failed) || 0;
     const renamed = Number(result.renamed) || 0;
     const name = result.packName ? ` "${result.packName}"` : '';
-    window.alert(
-      `Content pack${name} imported.\n\nImported: ${imported}\nSkipped: ${skipped}\nRenamed: ${renamed}\nFailed: ${failed}`
-    );
+    notify({
+      type: failed > 0 ? 'warning' : 'success',
+      title: `Content pack${name} imported`,
+      message: `Imported: ${imported} · Skipped: ${skipped} · Renamed: ${renamed} · Failed: ${failed}`,
+      timeout: failed > 0 ? 0 : 6000
+    });
     if (imported > 0 || renamed > 0) {
       await loadLibrary();
     }
@@ -181,6 +212,10 @@ elements.close.addEventListener('click', () => {
 elements.filterAll.addEventListener('click', () => setFilter('all'));
 elements.filterImages.addEventListener('click', () => setFilter('images'));
 elements.filterVideos.addEventListener('click', () => setFilter('videos'));
+elements.search.addEventListener('input', () => {
+  searchQuery = elements.search.value.trim().toLowerCase();
+  renderLibrary();
+});
 
 if (window.api && window.api.onLibraryScope) {
   window.api.onLibraryScope((scope) => {

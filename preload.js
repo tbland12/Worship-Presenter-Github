@@ -1,120 +1,47 @@
-const { contextBridge, ipcRenderer } = require('electron');
-const path = require('path');
-const fssync = require('fs');
-const JSZip = require('jszip');
-const { pathToFileURL } = require('url');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
-function resolveBundledLibraryRoot() {
-  const candidates = [];
-  if (process.resourcesPath) {
-    candidates.push(path.join(process.resourcesPath, 'library'));
-  }
-  candidates.push(path.join(__dirname, 'library'));
-  for (const candidate of candidates) {
-    if (candidate && fssync.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return candidates[0] || '';
-}
-
-let libraryRoot = '';
-let bundledLibraryRoot = resolveBundledLibraryRoot();
-let libraryRootsPromise = null;
-
-async function refreshLibraryRoots() {
-  if (libraryRootsPromise) {
-    return libraryRootsPromise;
-  }
-  libraryRootsPromise = (async () => {
-    try {
-      const roots = await ipcRenderer.invoke('library:roots');
-      if (roots && typeof roots === 'object') {
-        libraryRoot = roots.libraryRoot || libraryRoot;
-        bundledLibraryRoot = roots.bundledLibraryRoot || bundledLibraryRoot;
-      }
-    } catch (error) {
-      // Ignore and use fallbacks.
-      libraryRootsPromise = null;
-    }
-    return { libraryRoot, bundledLibraryRoot };
-  })();
-  return libraryRootsPromise;
-}
-
-refreshLibraryRoots();
-
-function resolveMediaUrl(projectFolder, relativePath) {
-  if (!projectFolder || !relativePath) {
-    return '';
-  }
-  const absolutePath = path.join(projectFolder, relativePath);
-  return pathToFileURL(absolutePath).toString();
+function mediaUrl(host, value, prefix) {
+  const cleaned = String(value || '').replace(prefix, '').replace(/\\/g, '/');
+  const encoded = cleaned.split('/').filter(Boolean).map(encodeURIComponent).join('/');
+  return encoded ? `worship-media://${host}/${encoded}` : '';
 }
 
 contextBridge.exposeInMainWorld('api', {
-  newProject: (options = {}) => ipcRenderer.invoke('project:new', options),
-  openProject: () => ipcRenderer.invoke('project:open'),
-  loadProject: (folderPath) => ipcRenderer.invoke('project:load', folderPath),
-  saveProject: (folderPath, project) => ipcRenderer.invoke('project:save', folderPath, project),
+  resetSession: () => ipcRenderer.invoke('session:reset'),
   openProjectFile: () => ipcRenderer.invoke('project:open-file'),
-  saveProjectFile: (filePath, project, options = {}) => ipcRenderer.invoke('project:save-file', filePath, project, options),
+  openRecentProject: (id) => ipcRenderer.invoke('project:open-recent', id),
+  listRecentProjects: () => ipcRenderer.invoke('project:list-recent'),
+  saveProjectFile: (project) => ipcRenderer.invoke('project:save-file', project),
+  writeRecovery: (project) => ipcRenderer.invoke('project:write-recovery', project),
+  clearRecovery: () => ipcRenderer.invoke('project:clear-recovery'),
+  checkRecovery: () => ipcRenderer.invoke('project:check-recovery'),
+  listSongLibrary: (query = '') => ipcRenderer.invoke('song-library:list', query),
+  saveSongToLibrary: (song) => ipcRenderer.invoke('song-library:save', { song }),
+  instantiateLibrarySong: (id) => ipcRenderer.invoke('song-library:instantiate', id),
+  removeLibrarySong: (id) => ipcRenderer.invoke('song-library:remove', id),
+  confirmProjectTransition: () => ipcRenderer.invoke('project:confirm-transition'),
+  setProjectDirty: (dirty) => ipcRenderer.send('project:set-dirty', dirty === true),
+  completeProjectClose: (saved) => ipcRenderer.send('project:complete-close', saved === true),
+  onSaveBeforeClose: (callback) => ipcRenderer.on('project:save-before-close', () => callback()),
   pickLyrics: () => ipcRenderer.invoke('lyrics:pick'),
-  readTextFile: (filePath) => ipcRenderer.invoke('file:read-text', filePath),
+  readTextFile: (token) => ipcRenderer.invoke('file:read-text', token),
   editCommand: (command) => ipcRenderer.send('edit:command', command),
-  readPptxSlides: async (filePath) => {
-    if (!filePath) {
-      return [];
-    }
-    const data = await fssync.promises.readFile(filePath);
-    const zip = await JSZip.loadAsync(data);
-    const entries = Object.keys(zip.files).map((entry) => ({
-      entry,
-      normalized: entry.replace(/\\/g, '/')
-    }));
-    let slidePaths = entries.filter(({ normalized }) => /ppt\/slides\/slide\d+\.xml$/i.test(normalized));
-    if (slidePaths.length === 0) {
-      slidePaths = entries.filter(
-        ({ normalized }) => /ppt\/slides\/[^/]+\.xml$/i.test(normalized) && !/ppt\/slides\/_rels\//i.test(normalized)
-      );
-    }
-    slidePaths.sort((a, b) => {
-      const aMatch = a.normalized.match(/slide(\d+)\.xml$/i);
-      const bMatch = b.normalized.match(/slide(\d+)\.xml$/i);
-      const aIndex = aMatch ? Number(aMatch[1]) : 0;
-      const bIndex = bMatch ? Number(bMatch[1]) : 0;
-      return aIndex - bIndex;
-    });
-    const slides = [];
-    for (const slidePath of slidePaths) {
-      const xml = await zip.file(slidePath.entry).async('string');
-      slides.push(xml);
-    }
-    return slides;
-  },
+  readPptxSlides: (token) => ipcRenderer.invoke('pptx:read-slides', token),
   pickMedia: () => ipcRenderer.invoke('media:pick'),
-  importMedia: (projectFolder, sourcePath) => ipcRenderer.invoke('media:import', projectFolder, sourcePath),
-  importLibrary: (sourcePath) => ipcRenderer.invoke('library:import', sourcePath),
-  importContentPack: () => ipcRenderer.invoke('content-pack:import'),
-  importAnnouncement: (sourcePath) => ipcRenderer.invoke('announcement:import', sourcePath),
+  importLibrary: (payload) => ipcRenderer.invoke('library:import', payload),
+  importAnnouncement: (token) => ipcRenderer.invoke('announcement:import', token),
   pickAnnouncement: () => ipcRenderer.invoke('announcement:pick'),
   openLibrary: (options = {}) => ipcRenderer.send('library:open', options),
-  closeLibrary: () => ipcRenderer.send('library:close'),
-  listLibraryItems: (options = {}) => ipcRenderer.invoke('library:list', options),
-  selectLibraryItem: (payload) => ipcRenderer.send('library:select', payload),
   onLibrarySelected: (callback) => ipcRenderer.on('library:selected', (_event, payload) => callback(payload)),
-  onLibraryScope: (callback) => ipcRenderer.on('library:scope', (_event, scope) => callback(scope)),
   checkAssets: (payload) => ipcRenderer.invoke('assets:check', payload),
   onMenuAction: (callback) => ipcRenderer.on('menu:action', (_event, action) => callback(action)),
-  ensureLibraryRoots: () => refreshLibraryRoots(),
-  resolveLibraryUrl: (relativePath) => {
-    if (!relativePath) {
-      return '';
+  registerDroppedFile: (file) => {
+    try {
+      const filePath = webUtils.getPathForFile(file);
+      return filePath ? ipcRenderer.invoke('file:register-drop', filePath) : Promise.resolve(null);
+    } catch (error) {
+      return Promise.resolve(null);
     }
-    const cleaned = relativePath.replace(/^library[\\/]/, '');
-    const basePath = libraryRoot || bundledLibraryRoot || path.join(__dirname, 'library');
-    const absolutePath = path.join(basePath, cleaned);
-    return pathToFileURL(absolutePath).toString();
   },
   listDisplays: () => ipcRenderer.invoke('display:list'),
   showProgram: (displayId) => ipcRenderer.send('program:show', displayId),
@@ -122,10 +49,15 @@ contextBridge.exposeInMainWorld('api', {
   setProgramDisplay: (displayId) => ipcRenderer.send('program:set-display', displayId),
   toggleProgramFullscreen: () => ipcRenderer.send('program:toggle-fullscreen'),
   sendProgramState: (state) => ipcRenderer.send('program:state', state),
-  sendProgramEvent: (payload) => ipcRenderer.send('program:event', payload),
-  onProgramState: (callback) => ipcRenderer.on('program:state', (_event, state) => callback(state)),
   onProgramEvent: (callback) => ipcRenderer.on('program:event', (_event, payload) => callback(payload)),
   onDisplayChanged: (callback) => ipcRenderer.on('display:changed', (_event, payload) => callback(payload)),
-  resolveMediaUrl,
+  getStageConfig: () => ipcRenderer.invoke('stage:get-config'),
+  showStage: (displayId) => ipcRenderer.send('stage:show', displayId),
+  hideStage: () => ipcRenderer.send('stage:hide'),
+  setStageDisplay: (displayId) => ipcRenderer.send('stage:set-display', displayId),
+  sendStageState: (state) => ipcRenderer.send('stage:state', state),
+  onStageEvent: (callback) => ipcRenderer.on('stage:event', (_event, payload) => callback(payload)),
+  resolveLibraryUrl: (assetPath) => mediaUrl('library', assetPath, /^library[\\/]/),
+  resolveSessionUrl: (assetPath) => mediaUrl('asset', assetPath, /^session\//),
   getAppVersion: () => ipcRenderer.invoke('app:get-version')
 });

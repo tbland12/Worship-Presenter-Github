@@ -9,6 +9,7 @@ import {
 } from './shared/model.js';
 import { StageRenderer } from './shared/stage.js';
 import { ensureApiBridge } from './shared/bridge.js';
+import { createNotifier, initializeAppearance } from './shared/ui.js';
 
 const elements = {
   newProject: document.getElementById('new-project'),
@@ -17,6 +18,11 @@ const elements = {
   fileMenu: document.getElementById('file-menu'),
   assetWarning: document.getElementById('asset-warning'),
   projectPath: document.getElementById('project-path'),
+  saveStatus: document.getElementById('save-status'),
+  appearanceToggle: document.getElementById('appearance-toggle'),
+  announcementCount: document.getElementById('announcement-count'),
+  timerCount: document.getElementById('timer-count'),
+  setlistCount: document.getElementById('setlist-count'),
   addAnnouncement: document.getElementById('add-announcement'),
   announcements: document.getElementById('announcements-list'),
   announcementsEmpty: document.getElementById('announcements-empty'),
@@ -28,11 +34,25 @@ const elements = {
   timerPreviewEmpty: document.getElementById('timer-preview-empty'),
   timerButton: document.getElementById('select-timer'),
   addSong: document.getElementById('add-song'),
+  openSongLibrary: document.getElementById('open-song-library'),
+  saveSongLibrary: document.getElementById('save-song-library'),
+  songLibraryStatus: document.getElementById('song-library-status'),
+  songLibraryDialog: document.getElementById('song-library-dialog'),
+  closeSongLibrary: document.getElementById('close-song-library'),
+  songLibrarySearch: document.getElementById('song-library-search'),
+  songLibraryResults: document.getElementById('song-library-results'),
+  songLibraryEmpty: document.getElementById('song-library-empty'),
+  addLibrarySong: document.getElementById('add-library-song'),
+  deleteLibrarySong: document.getElementById('delete-library-song'),
   setlist: document.getElementById('setlist'),
   setlistEmpty: document.getElementById('setlist-empty'),
   previewStage: document.getElementById('preview-stage'),
+  previewStagePrevious: document.getElementById('preview-stage-previous'),
+  previewStageNext: document.getElementById('preview-stage-next'),
   previewSplitter: document.getElementById('preview-splitter'),
   previewCard: document.getElementById('preview-card'),
+  previewCardPrevious: document.getElementById('preview-card-previous'),
+  previewCardNext: document.getElementById('preview-card-next'),
   previewWrap: document.getElementById('preview-wrap'),
   editorTitle: document.getElementById('editor-title'),
   songEditor: document.getElementById('song-editor'),
@@ -52,6 +72,7 @@ const elements = {
   lyricsText: document.getElementById('lyrics-text'),
   footerText: document.getElementById('footer-text'),
   footerAuto: document.getElementById('footer-auto'),
+  speakerNotes: document.getElementById('speaker-notes'),
   titleRow: document.getElementById('title-row'),
   lyricsRow: document.getElementById('lyrics-row'),
   footerRow: document.getElementById('footer-row'),
@@ -67,6 +88,7 @@ const elements = {
   announcementAdvance: document.getElementById('announcement-advance'),
   announcementLoop: document.getElementById('announcement-loop'),
   announcementHideLoop: document.getElementById('announcement-hide-loop'),
+  announcementSpeakerNotes: document.getElementById('announcement-speaker-notes'),
   timerInspector: document.getElementById('timer-inspector'),
   openTimerLibrary: document.getElementById('open-timer-library'),
   uploadTimerMedia: document.getElementById('upload-timer-media'),
@@ -75,6 +97,7 @@ const elements = {
   timerAutoImages: document.getElementById('timer-auto-images'),
   timerAdvance: document.getElementById('timer-advance'),
   timerAdvanceRow: document.getElementById('timer-advance-row'),
+  timerSpeakerNotes: document.getElementById('timer-speaker-notes'),
   themeTarget: document.getElementById('theme-target'),
   themeFont: document.getElementById('theme-font'),
   themeBase: document.getElementById('theme-base'),
@@ -109,6 +132,8 @@ const elements = {
   autoGoLive: document.getElementById('auto-go-live'),
   followLive: document.getElementById('follow-live'),
   displaySelect: document.getElementById('display-select'),
+  toggleStageDisplay: document.getElementById('toggle-stage-display'),
+  stageDisplaySelect: document.getElementById('stage-display-select'),
   liveStatus: document.getElementById('live-status'),
   slideContext: document.getElementById('slide-context'),
   mediaContext: document.getElementById('media-context'),
@@ -116,12 +141,26 @@ const elements = {
   inspectorEmpty: document.getElementById('inspector-empty')
 };
 
+initializeAppearance(elements.appearanceToggle);
+const notify = createNotifier(document.getElementById('toast-region'));
+
+function showNotice(message, type = 'warning', title = '') {
+  return notify({
+    type,
+    title: title || (type === 'error' ? 'Action failed' : type === 'success' ? 'Complete' : 'Check this'),
+    message,
+    timeout: type === 'error' ? 0 : 5000
+  });
+}
+
 const previewRenderer = new StageRenderer(elements.previewStage);
+const previewPreviousRenderer = new StageRenderer(elements.previewStagePrevious);
+const previewNextRenderer = new StageRenderer(elements.previewStageNext);
 
 const apiBridge = ensureApiBridge();
 if (!apiBridge) {
   window.setTimeout(() => {
-    window.alert('Electron bridge is unavailable. Dialogs will not open. Please restart the app.');
+    showNotice('Electron bridge is unavailable. Dialogs will not open. Please restart the app.', 'error', 'App connection unavailable');
   }, 200);
 }
 
@@ -149,6 +188,7 @@ const state = {
   projectFolder: null,
   projectFile: null,
   autoSaveEnabled: false,
+  dirty: false,
   selectedSection: 'setlist',
   selectedSongId: null,
   selectedSlideIndex: 0,
@@ -160,12 +200,23 @@ const state = {
   autoGoLive: false,
   followLive: true,
   displayTarget: null,
+  stageDisplayTarget: null,
+  stageVisible: false,
   themeTarget: 'lyrics',
-  runtimeBackgrounds: {},
   libraryTarget: null
 };
 
 let saveTimer = null;
+let saveLoopPromise = null;
+let saveRequested = false;
+let recoveryTimer = null;
+let recoveryWritePromise = null;
+let recoveryErrorShown = false;
+let songLibraryItems = [];
+let selectedLibrarySongId = null;
+let songLibrarySearchTimer = null;
+let songLibraryRequestToken = 0;
+let projectRevision = 0;
 let assetCheckTimer = null;
 let assetCheckToken = 0;
 let dropCounter = 0;
@@ -173,10 +224,54 @@ let internalDragActive = false;
 let announcementAdvanceTimer = null;
 let timerImageAdvanceTimer = null;
 const PREVIEW_BASE = { width: 1920, height: 1080 };
+const DEFAULT_PREVIEW_SCALE = 0.7;
+const ADJACENT_PREVIEW_SCALE = 0.82;
 let previewObserver = null;
 let previewSplitState = null;
 const SECTION_HEADER_REGEX = /^(verse|chorus|bridge|pre-chorus|prechorus|intro|outro|tag|refrain|ending|hook)(\s+\d+)?$/i;
 let announcementDragState = null;
+
+function appendMediaPlaceholder(container, label) {
+  const placeholder = document.createElement('span');
+  placeholder.className = 'media-label';
+  placeholder.textContent = label;
+  container.appendChild(placeholder);
+}
+
+function appendListItemContent(item, primaryText, secondaryText) {
+  const primary = document.createElement('strong');
+  primary.textContent = primaryText;
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const secondary = document.createElement('span');
+  secondary.textContent = secondaryText;
+  meta.appendChild(secondary);
+  item.appendChild(primary);
+  item.appendChild(meta);
+}
+
+function makeSelectableListItem(item, activate, label) {
+  item.tabIndex = 0;
+  item.setAttribute('role', 'button');
+  if (label) item.setAttribute('aria-label', label);
+  item.addEventListener('click', activate);
+  item.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    event.preventDefault();
+    activate();
+  });
+}
+
+async function registerRendererFile(file) {
+  if (!file) {
+    return '';
+  }
+  if (window.api?.registerDroppedFile) {
+    const result = await window.api.registerDroppedFile(file);
+    return result?.token || '';
+  }
+  return '';
+}
 
 function cleanupAnnouncementDragState(options = {}) {
   const resumeAutoAdvance = options.resumeAutoAdvance === true;
@@ -370,17 +465,17 @@ function getPreviousAnnouncementIndex(currentIndex, slides, loopEnabled) {
 }
 
 function updatePreviewScale() {
-  const stage = elements.previewStage;
-  if (!stage) {
-    return;
-  }
-  const width = stage.clientWidth;
-  const height = stage.clientHeight;
-  if (!width || !height) {
-    return;
-  }
-  const scale = Math.min(1, width / PREVIEW_BASE.width, height / PREVIEW_BASE.height);
-  previewRenderer.setScale(scale);
+  [
+    [elements.previewStage, previewRenderer],
+    [elements.previewStagePrevious, previewPreviousRenderer],
+    [elements.previewStageNext, previewNextRenderer]
+  ].forEach(([stage, renderer]) => {
+    if (!stage) return;
+    const width = stage.clientWidth;
+    const height = stage.clientHeight;
+    if (!width || !height) return;
+    renderer.setScale(Math.min(1, width / PREVIEW_BASE.width, height / PREVIEW_BASE.height));
+  });
 }
 
 function getPreviewConstraints() {
@@ -406,6 +501,25 @@ function setPreviewCardHeight(height) {
   const finalHeight = width * (9 / 16);
   elements.previewCard.style.width = `${width}px`;
   elements.previewCard.style.height = `${finalHeight}px`;
+  elements.previewWrap.style.height = `${finalHeight}px`;
+
+  const adjacentWidth = width * ADJACENT_PREVIEW_SCALE;
+  const adjacentHeight = finalHeight * ADJACENT_PREVIEW_SCALE;
+  const centerLeft = (constraints.wrapWidth - width) / 2;
+  const overlap = width * 0.26;
+  const adjacentTop = (finalHeight - adjacentHeight) / 2;
+  if (elements.previewCardPrevious) {
+    elements.previewCardPrevious.style.width = `${adjacentWidth}px`;
+    elements.previewCardPrevious.style.height = `${adjacentHeight}px`;
+    elements.previewCardPrevious.style.left = `${centerLeft - adjacentWidth + overlap}px`;
+    elements.previewCardPrevious.style.top = `${adjacentTop}px`;
+  }
+  if (elements.previewCardNext) {
+    elements.previewCardNext.style.width = `${adjacentWidth}px`;
+    elements.previewCardNext.style.height = `${adjacentHeight}px`;
+    elements.previewCardNext.style.left = `${centerLeft + width - overlap}px`;
+    elements.previewCardNext.style.top = `${adjacentTop}px`;
+  }
   if (previewSplitState) {
     previewSplitState.height = finalHeight;
     previewSplitState.maxHeight = constraints.maxHeight;
@@ -427,7 +541,7 @@ function initPreviewSplitter() {
   previewSplitState = {
     maxHeight: constraints.maxHeight,
     minHeight: constraints.minHeight,
-    height: constraints.maxHeight
+    height: constraints.maxHeight * DEFAULT_PREVIEW_SCALE
   };
   setPreviewCardHeight(previewSplitState.height);
 
@@ -504,7 +618,7 @@ async function checkAssets() {
   const requestId = ++assetCheckToken;
   let result = null;
   try {
-    result = await window.api.checkAssets({ paths, projectFolder: state.projectFolder });
+    result = await window.api.checkAssets({ paths });
   } catch (error) {
     console.error('Failed to check media assets', error);
   }
@@ -577,6 +691,11 @@ function resolveTextStyle(theme, key) {
 function normalizeProject(project) {
   const base = createNewProject();
   const normalized = project || base;
+  const schemaVersion = normalized.schemaVersion == null ? 1 : Number(normalized.schemaVersion);
+  if (!Number.isInteger(schemaVersion) || schemaVersion < 1 || schemaVersion > 2) {
+    throw new Error(`Unsupported project schema version: ${normalized.schemaVersion}.`);
+  }
+  normalized.schemaVersion = 2;
 
   normalized.settings = { ...base.settings, ...(normalized.settings || {}) };
   normalized.announcements = { ...base.announcements, ...(normalized.announcements || {}) };
@@ -599,7 +718,8 @@ function normalizeProject(project) {
       label: slide.label || `Slide ${index + 1}`,
       mediaPath,
       mediaType: mediaType === 'video' ? 'video' : 'image',
-      hideDuringLoop
+      hideDuringLoop,
+      speakerNotes: typeof slide.speakerNotes === 'string' ? slide.speakerNotes : ''
     };
   };
 
@@ -628,6 +748,12 @@ function normalizeProject(project) {
       path: '',
       ...(song.background || {})
     };
+    song.librarySource = song.librarySource
+      && typeof song.librarySource.id === 'string'
+      && Number.isInteger(song.librarySource.revision)
+      && song.librarySource.revision > 0
+      ? { id: song.librarySource.id, revision: song.librarySource.revision }
+      : null;
     const mergedTheme = {
       ...defaultTheme,
       ...(song.theme || {}),
@@ -657,7 +783,8 @@ function normalizeProject(project) {
         footerAutoCcli: slide.footerAutoCcli === true,
         titleText,
         lyricsText,
-        footerText
+        footerText,
+        speakerNotes: typeof slide.speakerNotes === 'string' ? slide.speakerNotes : ''
       };
     });
   });
@@ -666,13 +793,18 @@ function normalizeProject(project) {
 }
 
 function setProject(project, filePath = null, folderPath = null) {
+  clearRecoveryTimer();
   const normalized = normalizeProject(project);
   state.project = normalized;
   state.projectFolder = folderPath;
   state.projectFile = filePath;
-  state.autoSaveEnabled = false;
-  state.runtimeBackgrounds = {};
-  elements.projectPath.textContent = filePath || folderPath || 'Unsaved session';
+  state.autoSaveEnabled = Boolean(filePath);
+  state.dirty = false;
+  projectRevision += 1;
+  saveRequested = false;
+  updateProjectPathLabel();
+  setSaveState('saved');
+  window.api?.setProjectDirty?.(false);
   state.selectedAnnouncementIndex = -1;
   state.selectedTimerIndex = -1;
   state.selectedSection = 'setlist';
@@ -683,6 +815,7 @@ function setProject(project, filePath = null, folderPath = null) {
   state.live = { section: null, songId: null, slideIndex: 0 };
 
   refreshAll();
+  sendStageState(null);
 }
 
 function getSelectedSong() {
@@ -777,6 +910,42 @@ function getPreviewSelection() {
   return { section: 'setlist', song, slide, slideIndex: state.preview.slideIndex };
 }
 
+function getAdjacentPreviewSelection(direction) {
+  const selection = getPreviewSelection();
+  if (!selection || (direction !== -1 && direction !== 1)) {
+    return null;
+  }
+  if (selection.section === 'announcements' || selection.section === 'timer') {
+    const slides = selection.section === 'announcements'
+      ? state.project.announcements.slides || []
+      : state.project.timer.slides || [];
+    const slideIndex = selection.slideIndex + direction;
+    const slide = slides[slideIndex];
+    return slide ? { section: selection.section, song: null, slide, slideIndex } : null;
+  }
+
+  const sameSongIndex = selection.slideIndex + direction;
+  if (selection.song.slides[sameSongIndex]) {
+    return {
+      section: 'setlist',
+      song: selection.song,
+      slide: selection.song.slides[sameSongIndex],
+      slideIndex: sameSongIndex
+    };
+  }
+
+  let songIndex = state.project.setlist.indexOf(selection.song.id) + direction;
+  while (songIndex >= 0 && songIndex < state.project.setlist.length) {
+    const song = state.project.songs[state.project.setlist[songIndex]];
+    if (song && song.slides.length > 0) {
+      const slideIndex = direction < 0 ? song.slides.length - 1 : 0;
+      return { section: 'setlist', song, slide: song.slides[slideIndex], slideIndex };
+    }
+    songIndex += direction;
+  }
+  return null;
+}
+
 function getLiveSelection() {
   const section = state.live.section;
   if (section === 'announcements') {
@@ -809,15 +978,67 @@ function getLiveSelection() {
   return { section: 'setlist', song, slide, slideIndex: state.live.slideIndex };
 }
 
-function buildTextFromSlide(slide) {
-  return {
-    title: plainFromRichText(slide.titleText),
-    lyrics: plainFromRichText(slide.lyricsText),
-    footer: plainFromRichText(slide.footerText),
-    showTitle: slide.showTitle,
-    showLyrics: slide.showLyrics,
-    showFooter: slide.showFooter
-  };
+function getNextLiveSelection(selection = getLiveSelection()) {
+  if (!selection) return null;
+  if (selection.section === 'announcements') {
+    const slides = state.project.announcements.slides || [];
+    const nextIndex = getNextAnnouncementIndex(
+      selection.slideIndex,
+      slides,
+      state.project.announcements.loop === true
+    );
+    if (nextIndex === selection.slideIndex) return null;
+    const slide = slides[nextIndex];
+    return slide ? { section: 'announcements', song: null, slide, slideIndex: nextIndex } : null;
+  }
+  if (selection.section === 'timer') {
+    const slideIndex = selection.slideIndex + 1;
+    const slide = state.project.timer.slides?.[slideIndex];
+    return slide ? { section: 'timer', song: null, slide, slideIndex } : null;
+  }
+  if (selection.song.slides[selection.slideIndex + 1]) {
+    const slideIndex = selection.slideIndex + 1;
+    return { section: 'setlist', song: selection.song, slide: selection.song.slides[slideIndex], slideIndex };
+  }
+  let songIndex = state.project.setlist.indexOf(selection.song.id) + 1;
+  while (songIndex < state.project.setlist.length) {
+    const song = state.project.songs[state.project.setlist[songIndex]];
+    if (song?.slides?.length) return { section: 'setlist', song, slide: song.slides[0], slideIndex: 0 };
+    songIndex += 1;
+  }
+  return null;
+}
+
+function stageSelectionText(selection) {
+  if (!selection) return '';
+  if (selection.section !== 'setlist') return selection.slide.label || 'Media slide';
+  if (selection.slide.showLyrics) return plainFromRichText(selection.slide.lyricsText);
+  if (selection.slide.showTitle) return plainFromRichText(selection.slide.titleText);
+  if (selection.slide.showFooter) return plainFromRichText(selection.slide.footerText);
+  return selection.slide.label || 'Blank slide';
+}
+
+function stageSelectionLabel(selection) {
+  if (!selection) return '';
+  if (selection.section === 'setlist') return `${selection.song.title} · ${selection.slide.label || `Slide ${selection.slideIndex + 1}`}`;
+  return selection.slide.label || `Slide ${selection.slideIndex + 1}`;
+}
+
+function sendStageState(selection = getLiveSelection()) {
+  if (!window.api?.sendStageState) return;
+  const next = getNextLiveSelection(selection);
+  const sectionNames = { setlist: 'Song', announcements: 'Announcements', timer: 'Countdown' };
+  window.api.sendStageState({
+    active: Boolean(selection),
+    panic: state.panic,
+    section: selection ? sectionNames[selection.section] || 'Live' : '',
+    itemTitle: selection?.song?.title || selection?.slide?.label || '',
+    currentLabel: stageSelectionLabel(selection),
+    currentText: stageSelectionText(selection),
+    currentNotes: selection?.slide?.speakerNotes || '',
+    nextLabel: stageSelectionLabel(next),
+    nextText: stageSelectionText(next)
+  });
 }
 
 function buildCcliFooter(song) {
@@ -857,52 +1078,28 @@ function buildBackground(song) {
     return null;
   }
   const rawPath = song.background.path;
-  if (rawPath.startsWith('file://')) {
-    return { type: song.background.type, path: rawPath };
-  }
   if (rawPath.startsWith('library/') || rawPath.startsWith('library\\')) {
     if (window.api && window.api.resolveLibraryUrl) {
       return { type: song.background.type, path: window.api.resolveLibraryUrl(rawPath) };
     }
   }
-  if (/^[a-zA-Z]:[\\/]/.test(rawPath)) {
-    const normalized = rawPath.replace(/\\/g, '/');
-    return { type: song.background.type, path: `file:///${encodeURI(normalized)}` };
+  if (rawPath.startsWith('session/') && window.api?.resolveSessionUrl) {
+    return { type: song.background.type, path: window.api.resolveSessionUrl(rawPath) };
   }
-  const runtimePath = state.runtimeBackgrounds[song.id];
-  if (runtimePath) {
-    return { type: song.background.type, path: runtimePath };
-  }
-  if (!window.api || !window.api.resolveMediaUrl) {
-    return null;
-  }
-  if (!state.projectFolder) {
-    return null;
-  }
-  return {
-    type: song.background.type,
-    path: window.api.resolveMediaUrl(state.projectFolder, song.background.path)
-  };
+  return null;
 }
 
 function resolveMediaPath(rawPath) {
   if (!rawPath) {
     return '';
   }
-  if (rawPath.startsWith('file://')) {
-    return rawPath;
-  }
   if (rawPath.startsWith('library/') || rawPath.startsWith('library\\')) {
     if (window.api && window.api.resolveLibraryUrl) {
       return window.api.resolveLibraryUrl(rawPath);
     }
   }
-  if (/^[a-zA-Z]:[\\/]/.test(rawPath)) {
-    const normalized = rawPath.replace(/\\/g, '/');
-    return `file:///${encodeURI(normalized)}`;
-  }
-  if (window.api && window.api.resolveMediaUrl && state.projectFolder) {
-    return window.api.resolveMediaUrl(state.projectFolder, rawPath);
+  if (rawPath.startsWith('session/') && window.api?.resolveSessionUrl) {
+    return window.api.resolveSessionUrl(rawPath);
   }
   return '';
 }
@@ -973,6 +1170,12 @@ function refreshAll() {
 }
 
 function renderLineupButtons() {
+  const announcementSlides = state.project.announcements?.slides || [];
+  const timerSlides = state.project.timer?.slides || [];
+  const setlist = state.project.setlist || [];
+  if (elements.announcementCount) elements.announcementCount.textContent = String(announcementSlides.length);
+  if (elements.timerCount) elements.timerCount.textContent = String(timerSlides.length);
+  if (elements.setlistCount) elements.setlistCount.textContent = String(setlist.length);
   if (elements.announcementsButton) {
     elements.announcementsButton.classList.toggle('active', state.selectedSection === 'announcements');
   }
@@ -1015,7 +1218,7 @@ function renderAnnouncements() {
   if (!list) {
     return;
   }
-  list.innerHTML = '';
+  list.replaceChildren();
   if (!list.dataset.dragHandlers) {
     list.dataset.dragHandlers = 'true';
     list.addEventListener('dragover', (event) => {
@@ -1068,6 +1271,9 @@ function renderAnnouncements() {
     if (state.selectedSection === 'announcements' && slideId === selectedId) {
       item.classList.add('active');
     }
+    if (state.live.section === 'announcements' && state.live.slideIndex === index) {
+      item.classList.add('live');
+    }
     if (announcementDragState && announcementDragState.draggingId === slideId) {
       item.classList.add('dragging');
     }
@@ -1081,7 +1287,7 @@ function renderAnnouncements() {
       img.alt = slide.label || `Announcement ${index + 1}`;
       thumb.appendChild(img);
     } else {
-      thumb.innerHTML = '<span class="media-label">No image</span>';
+      appendMediaPlaceholder(thumb, 'No image');
     }
 
     if (slide.hideDuringLoop) {
@@ -1094,7 +1300,7 @@ function renderAnnouncements() {
 
     item.appendChild(thumb);
 
-    item.addEventListener('click', () => selectAnnouncementSlide(index));
+    makeSelectableListItem(item, () => selectAnnouncementSlide(index), slide.label || `Announcement ${index + 1}`);
     item.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1165,7 +1371,7 @@ function renderTimerSlides() {
     if (!list) {
       return;
     }
-    list.innerHTML = '';
+    list.replaceChildren();
     if (empty) {
       empty.style.display = slides.length === 0 && showEmpty ? 'block' : 'none';
     }
@@ -1177,6 +1383,9 @@ function renderTimerSlides() {
       item.dataset.index = String(index);
       if (state.selectedSection === 'timer' && state.selectedTimerIndex === index) {
         item.classList.add('active');
+      }
+      if (state.live.section === 'timer' && state.live.slideIndex === index) {
+        item.classList.add('live');
       }
 
       const thumb = document.createElement('div');
@@ -1197,12 +1406,12 @@ function renderTimerSlides() {
           thumb.appendChild(img);
         }
       } else {
-        thumb.innerHTML = '<span class="media-label">No media</span>';
+        appendMediaPlaceholder(thumb, 'No media');
       }
 
       item.appendChild(thumb);
 
-      item.addEventListener('click', () => selectTimerSlide(index));
+      makeSelectableListItem(item, () => selectTimerSlide(index), slide.label || `Countdown slide ${index + 1}`);
       item.addEventListener('contextmenu', (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1259,7 +1468,7 @@ function renderTimerSlides() {
 }
 
 function renderSetlist() {
-  elements.setlist.innerHTML = '';
+  elements.setlist.replaceChildren();
   const songs = state.project.setlist;
   elements.setlistEmpty.style.display = songs.length === 0 ? 'block' : 'none';
 
@@ -1272,17 +1481,16 @@ function renderSetlist() {
     item.className = 'list-item draggable';
     item.draggable = true;
     item.dataset.index = String(index);
+    item.dataset.songId = songId;
     if (state.selectedSection === 'setlist' && songId === state.selectedSongId) {
       item.classList.add('active');
     }
-    item.innerHTML = `
-      <strong>${song.title || 'Untitled Song'}</strong>
-      <div class="meta">
-        <span>${song.slides.length} slides</span>
-      </div>
-    `;
+    if (state.live.section === 'setlist' && state.live.songId === songId) {
+      item.classList.add('live');
+    }
+    appendListItemContent(item, song.title || 'Untitled Song', `${song.slides.length} slides`);
 
-    item.addEventListener('click', () => selectSong(songId));
+    makeSelectableListItem(item, () => selectSong(songId), song.title || 'Untitled Song');
     item.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1341,10 +1549,19 @@ function renderSongDetails() {
   const song = state.selectedSection === 'setlist' ? getSelectedSong() : null;
   elements.songTitle.value = song ? song.title : '';
   elements.songTitle.disabled = !song;
+  if (elements.saveSongLibrary) {
+    elements.saveSongLibrary.disabled = !song;
+    elements.saveSongLibrary.textContent = song?.librarySource ? 'Update Library' : 'Save to Library';
+  }
+  if (elements.songLibraryStatus) {
+    elements.songLibraryStatus.textContent = song?.librarySource
+      ? `Linked to library · revision ${song.librarySource.revision}`
+      : 'Not linked to library';
+  }
 }
 
 function renderSlides() {
-  elements.slides.innerHTML = '';
+  elements.slides.replaceChildren();
   if (state.selectedSection !== 'setlist') {
     elements.slidesEmpty.style.display = 'block';
     return;
@@ -1364,20 +1581,22 @@ function renderSlides() {
     if (index === state.selectedSlideIndex) {
       item.classList.add('active');
     }
+    if (
+      state.live.section === 'setlist' &&
+      state.live.songId === song.id &&
+      state.live.slideIndex === index
+    ) {
+      item.classList.add('live');
+    }
 
     const rawText = plainFromRichText(slide.lyricsText) || plainFromRichText(slide.titleText) || 'Slide';
     const previewText = rawText.replace(/\s+/g, ' ').trim();
     const displayText = previewText.length > 30 ? `${previewText.slice(0, 30)}...` : previewText;
     const label = slide.label || `Slide ${index + 1}`;
 
-    item.innerHTML = `
-      <strong>${label}</strong>
-      <div class="meta">
-        <span>${displayText}</span>
-      </div>
-    `;
+    appendListItemContent(item, label, displayText);
 
-    item.addEventListener('click', () => selectSlide(index));
+    makeSelectableListItem(item, () => selectSlide(index), slide.label || `Slide ${index + 1}`);
     item.addEventListener('contextmenu', (event) => {
       event.preventDefault();
       event.stopPropagation();
@@ -1442,7 +1661,8 @@ function renderSlideEditor() {
       elements.titleText,
       elements.lyricsText,
       elements.footerText,
-      elements.footerAuto
+      elements.footerAuto,
+      elements.speakerNotes
     ].forEach((input) => {
       input.disabled = true;
     });
@@ -1451,6 +1671,7 @@ function renderSlideEditor() {
     elements.lyricsText.value = '';
     elements.footerText.value = '';
     elements.footerAuto.checked = false;
+    elements.speakerNotes.value = '';
     updateSlideVisibility();
     return;
   }
@@ -1465,6 +1686,7 @@ function renderSlideEditor() {
   elements.titleText.value = slide ? plainFromRichText(slide.titleText) : '';
   elements.lyricsText.value = slide ? plainFromRichText(slide.lyricsText) : '';
   elements.footerAuto.checked = slide ? slide.footerAutoCcli === true : false;
+  elements.speakerNotes.value = slide ? slide.speakerNotes || '' : '';
   const song = getSelectedSong();
   const footerValue = slide
     ? slide.footerAutoCcli
@@ -1484,7 +1706,8 @@ function renderSlideEditor() {
     elements.titleText,
     elements.lyricsText,
     elements.footerText,
-    elements.footerAuto
+    elements.footerAuto,
+    elements.speakerNotes
   ].forEach((input) => {
     input.disabled = disabled;
   });
@@ -1524,6 +1747,7 @@ function renderInspector() {
     elements.announcementLoop.checked = state.project.announcements.loop === true;
     elements.announcementAdvance.disabled = !elements.announcementLoop.checked;
     elements.announcementHideLoop.checked = slide.hideDuringLoop === true;
+    elements.announcementSpeakerNotes.value = slide.speakerNotes || '';
     elements.openAnnouncementLibrary.disabled = false;
     elements.uploadAnnouncement.disabled = false;
     return;
@@ -1542,6 +1766,7 @@ function renderInspector() {
     elements.timerAutoVideo.checked = state.project.timer.autoAdvanceOnVideoEnd !== false;
     elements.timerAutoImages.checked = state.project.timer.autoAdvanceImages === true;
     elements.timerAdvance.value = state.project.timer.autoAdvanceSec ?? 15;
+    elements.timerSpeakerNotes.value = slide.speakerNotes || '';
     elements.timerAdvanceRow.style.display = elements.timerAutoImages.checked ? 'flex' : 'none';
     elements.openTimerLibrary.disabled = false;
     elements.uploadTimerMedia.disabled = false;
@@ -1716,7 +1941,7 @@ function setThemeSectionCollapsed(collapsed) {
   elements.themeToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   const chevron = elements.themeToggle.querySelector('.chevron');
   if (chevron) {
-    chevron.textContent = collapsed ? '>' : 'v';
+    chevron.textContent = 'v';
   }
 }
 
@@ -1729,7 +1954,7 @@ function setCcliSectionCollapsed(collapsed) {
   elements.ccliToggle.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
   const chevron = elements.ccliToggle.querySelector('.chevron');
   if (chevron) {
-    chevron.textContent = collapsed ? '>' : 'v';
+    chevron.textContent = 'v';
   }
 }
 
@@ -1737,16 +1962,62 @@ function updatePreview() {
   const selection = getPreviewSelection();
   if (!selection) {
     previewRenderer.clear();
+    previewPreviousRenderer.clear();
+    previewNextRenderer.clear();
+    elements.previewCardPrevious.classList.add('is-empty');
+    elements.previewCardNext.classList.add('is-empty');
     return;
   }
   const renderState = buildRenderState(selection, false, { textImmediate: true });
   if (renderState) {
     previewRenderer.render(renderState);
   }
+
+  [
+    [getAdjacentPreviewSelection(-1), previewPreviousRenderer, elements.previewCardPrevious],
+    [getAdjacentPreviewSelection(1), previewNextRenderer, elements.previewCardNext]
+  ].forEach(([adjacentSelection, renderer, card]) => {
+    const adjacentState = adjacentSelection
+      ? buildRenderState(adjacentSelection, false, { textImmediate: true })
+      : null;
+    card.classList.toggle('is-empty', !adjacentState);
+    if (adjacentState) {
+      renderer.render(adjacentState);
+    } else {
+      renderer.clear();
+    }
+  });
+}
+
+function scrollLiveSlideIntoView() {
+  const selection = getLiveSelection();
+  if (!selection) return;
+
+  let list = null;
+  let item = null;
+  if (selection.section === 'setlist' && state.selectedSongId === selection.song.id) {
+    list = elements.slides;
+    item = list?.querySelector(`.list-item[data-index="${selection.slideIndex}"]`);
+  } else if (selection.section === 'announcements') {
+    list = elements.announcements;
+    item = list?.querySelector(`.list-item[data-index="${selection.slideIndex}"]`);
+  } else if (selection.section === 'timer') {
+    list = elements.timerPreviewList || elements.timerList;
+    item = list?.querySelector(`.list-item[data-index="${selection.slideIndex}"]`);
+  }
+  if (!list || !item) return;
+
+  window.requestAnimationFrame(() => {
+    const listRect = list.getBoundingClientRect();
+    const itemRect = item.getBoundingClientRect();
+    const centeredTop = list.scrollTop + itemRect.top - listRect.top - (list.clientHeight - itemRect.height) / 2;
+    list.scrollTo({ top: Math.max(0, centeredTop), behavior: 'smooth' });
+  });
 }
 
 function sendProgramState() {
   const selection = getLiveSelection();
+  sendStageState(selection);
   const renderState = buildRenderState(selection, state.panic);
   if (!renderState) {
     return;
@@ -1756,17 +2027,49 @@ function sendProgramState() {
 
 function updateLiveStatus() {
   const selection = getLiveSelection();
+  document.body.dataset.live = selection ? 'true' : 'false';
+  document.querySelectorAll('.list-item.live').forEach((item) => item.classList.remove('live'));
   if (!selection) {
-    elements.liveStatus.textContent = 'Live: -';
+    elements.liveStatus.textContent = 'Not live';
+    elements.hideProgram.textContent = 'Hide Output';
     return;
   }
+  elements.hideProgram.textContent = 'End Output';
   if (selection.section === 'announcements') {
-    elements.liveStatus.textContent = `Live: Announcements (Slide ${selection.slideIndex + 1})`;
+    elements.liveStatus.textContent = `Announcements · Slide ${selection.slideIndex + 1}`;
+    document.querySelectorAll('#announcements-list .list-item').forEach((item) => {
+      item.classList.toggle('live', Number(item.dataset.index) === selection.slideIndex);
+    });
   } else if (selection.section === 'timer') {
-    elements.liveStatus.textContent = `Live: Timer (Slide ${selection.slideIndex + 1})`;
+    elements.liveStatus.textContent = `Countdown · Slide ${selection.slideIndex + 1}`;
+    document.querySelectorAll('#timer-list .list-item, #timer-preview-list .list-item').forEach((item) => {
+      item.classList.toggle('live', Number(item.dataset.index) === selection.slideIndex);
+    });
   } else {
-    elements.liveStatus.textContent = `Live: ${selection.song.title} (Slide ${selection.slideIndex + 1})`;
+    elements.liveStatus.textContent = `${selection.song.title} · Slide ${selection.slideIndex + 1}`;
+    document.querySelectorAll('#setlist .list-item').forEach((item) => {
+      item.classList.toggle('live', item.dataset.songId === selection.song.id);
+    });
+    document.querySelectorAll('#slides .list-item').forEach((item) => {
+      item.classList.toggle(
+        'live',
+        state.selectedSongId === selection.song.id && Number(item.dataset.index) === selection.slideIndex
+      );
+    });
   }
+  scrollLiveSlideIntoView();
+}
+
+function initializeContextAccordions() {
+  document.querySelectorAll('[data-accordion-target]').forEach((button) => {
+    const target = document.getElementById(button.dataset.accordionTarget);
+    if (!target) return;
+    button.addEventListener('click', () => {
+      const expanded = button.getAttribute('aria-expanded') === 'true';
+      button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      target.hidden = expanded;
+    });
+  });
 }
 
 function clearAnnouncementAdvanceTimer() {
@@ -1921,6 +2224,130 @@ function addSong() {
   saveProjectIfPossible();
 }
 
+function renderSongLibraryResults() {
+  if (!elements.songLibraryResults) return;
+  elements.songLibraryResults.replaceChildren();
+  elements.songLibraryEmpty.hidden = songLibraryItems.length > 0;
+  songLibraryItems.forEach((item) => {
+    const row = document.createElement('li');
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'song-library-result';
+    button.dataset.libraryId = item.id;
+    button.setAttribute('aria-pressed', item.id === selectedLibrarySongId ? 'true' : 'false');
+
+    const title = document.createElement('span');
+    title.className = 'song-library-result-title';
+    title.textContent = item.title || 'Untitled Song';
+    const meta = document.createElement('span');
+    meta.className = 'song-library-result-meta';
+    const authorText = (item.authors || []).join(', ');
+    meta.textContent = authorText || (item.ccliSongNumber ? `CCLI ${item.ccliSongNumber}` : 'No author metadata');
+    const revision = document.createElement('span');
+    revision.className = 'song-library-result-revision';
+    revision.textContent = `Rev ${item.revision}`;
+    button.append(title, meta, revision);
+    button.addEventListener('click', () => {
+      selectedLibrarySongId = item.id;
+      renderSongLibraryResults();
+    });
+    button.addEventListener('dblclick', () => addSelectedLibrarySong());
+    row.appendChild(button);
+    elements.songLibraryResults.appendChild(row);
+  });
+  const hasSelection = songLibraryItems.some((item) => item.id === selectedLibrarySongId);
+  if (!hasSelection) selectedLibrarySongId = null;
+  elements.addLibrarySong.disabled = !selectedLibrarySongId;
+  elements.deleteLibrarySong.disabled = !selectedLibrarySongId;
+}
+
+async function refreshSongLibrary() {
+  if (!window.api?.listSongLibrary) return;
+  const requestToken = ++songLibraryRequestToken;
+  try {
+    const items = await window.api.listSongLibrary(elements.songLibrarySearch?.value || '');
+    if (requestToken !== songLibraryRequestToken) return;
+    songLibraryItems = Array.isArray(items) ? items : [];
+    renderSongLibraryResults();
+  } catch (error) {
+    console.error('Failed to load song library', error);
+    showNotice('The song library could not be loaded.', 'error', 'Library unavailable');
+  }
+}
+
+function openSongLibraryDialog() {
+  if (!elements.songLibraryDialog) return;
+  selectedLibrarySongId = null;
+  elements.songLibraryDialog.showModal();
+  refreshSongLibrary();
+  window.setTimeout(() => elements.songLibrarySearch?.focus(), 0);
+}
+
+function closeSongLibraryDialog() {
+  if (elements.songLibraryDialog?.open) elements.songLibraryDialog.close();
+}
+
+async function addSelectedLibrarySong() {
+  if (!selectedLibrarySongId || !window.api?.instantiateLibrarySong) return;
+  if (state.project.setlist.length >= 1000) {
+    showNotice('A project cannot contain more than 1,000 songs.', 'error', 'Setlist limit reached');
+    return;
+  }
+  elements.addLibrarySong.disabled = true;
+  try {
+    const song = await window.api.instantiateLibrarySong(selectedLibrarySongId);
+    if (!song?.id) throw new Error('Library song data is invalid.');
+    state.project.songs[song.id] = song;
+    state.project.setlist.push(song.id);
+    closeSongLibraryDialog();
+    selectSong(song.id);
+    saveProjectIfPossible();
+    showNotice(`“${song.title}” was added to the setlist.`, 'success', 'Song added');
+  } catch (error) {
+    console.error('Failed to add library song', error);
+    showNotice('The selected song could not be added.', 'error', 'Add failed');
+    elements.addLibrarySong.disabled = false;
+  }
+}
+
+async function deleteSelectedLibrarySong() {
+  if (!selectedLibrarySongId || !window.api?.removeLibrarySong) return;
+  try {
+    const result = await window.api.removeLibrarySong(selectedLibrarySongId);
+    if (!result?.deleted) return;
+    selectedLibrarySongId = null;
+    await refreshSongLibrary();
+    showNotice('The song was removed from the library.', 'success', 'Library updated');
+  } catch (error) {
+    console.error('Failed to delete library song', error);
+    showNotice('The selected song could not be deleted.', 'error', 'Delete failed');
+  }
+}
+
+async function saveSelectedSongToLibrary() {
+  const song = getSelectedSong();
+  if (!song || !window.api?.saveSongToLibrary) return;
+  elements.saveSongLibrary.disabled = true;
+  try {
+    const result = await window.api.saveSongToLibrary(structuredClone(song));
+    if (!result?.ok) {
+      if (result?.conflict) showNotice('The newer library revision was left unchanged.', 'warning', 'Update canceled');
+      else showNotice(result?.error || 'The song could not be saved to the library.', 'error', 'Library save failed');
+      return;
+    }
+    state.project.songs[song.id] = { ...result.song, id: song.id };
+    refreshAll();
+    saveProjectIfPossible();
+    if (elements.songLibraryDialog?.open) refreshSongLibrary();
+    showNotice('The song library was updated.', 'success', 'Song saved');
+  } catch (error) {
+    console.error('Failed to save song to library', error);
+    showNotice('The song could not be saved to the library.', 'error', 'Library save failed');
+  } finally {
+    renderSongDetails();
+  }
+}
+
 function addAnnouncementSlide() {
   const slides = state.project.announcements.slides;
   const label = `Announcement ${slides.length + 1}`;
@@ -1983,18 +2410,6 @@ function deleteSong(songId) {
   saveProjectIfPossible();
 }
 
-function moveSong(index, delta) {
-  const newIndex = index + delta;
-  if (newIndex < 0 || newIndex >= state.project.setlist.length) {
-    return;
-  }
-  const list = state.project.setlist;
-  const [moved] = list.splice(index, 1);
-  list.splice(newIndex, 0, moved);
-  refreshAll();
-  saveProjectIfPossible();
-}
-
 function reorderSong(fromIndex, toIndex, position = 'before') {
   const list = state.project.setlist;
   if (fromIndex < 0 || fromIndex >= list.length) {
@@ -2049,9 +2464,6 @@ function copySong(songId) {
   const insertIndex = index === -1 ? state.project.setlist.length : index + 1;
   state.project.setlist.splice(insertIndex, 0, newId);
 
-  if (state.runtimeBackgrounds[songId]) {
-    state.runtimeBackgrounds[newId] = state.runtimeBackgrounds[songId];
-  }
 
   selectSong(newId);
   refreshAll();
@@ -2167,23 +2579,6 @@ function deleteTimerSlide(index) {
   if (getLiveSelection()) {
     sendProgramState();
   }
-  saveProjectIfPossible();
-}
-
-function moveSlide(index, delta) {
-  const song = getSelectedSong();
-  if (!song) {
-    return;
-  }
-  const newIndex = index + delta;
-  if (newIndex < 0 || newIndex >= song.slides.length) {
-    return;
-  }
-  const [moved] = song.slides.splice(index, 1);
-  song.slides.splice(newIndex, 0, moved);
-  state.selectedSlideIndex = newIndex;
-  state.preview = { section: 'setlist', songId: song.id, slideIndex: newIndex };
-  refreshAll();
   saveProjectIfPossible();
 }
 
@@ -2337,55 +2732,6 @@ function clearTimerDragIndicators() {
   });
 }
 
-function reorderAnnouncement(fromIndex, toIndex, position = 'before') {
-  const slides = state.project.announcements.slides;
-  if (fromIndex < 0 || fromIndex >= slides.length) {
-    return;
-  }
-  if (toIndex < 0 || toIndex >= slides.length) {
-    return;
-  }
-  let insertIndex = toIndex;
-  if (position === 'after') {
-    insertIndex += 1;
-  }
-  if (insertIndex > fromIndex) {
-    insertIndex -= 1;
-  }
-  if (insertIndex === fromIndex) {
-    clearAnnouncementDragIndicators();
-    return;
-  }
-  const [moved] = slides.splice(fromIndex, 1);
-  const maxIndex = slides.length;
-  if (insertIndex < 0) {
-    insertIndex = 0;
-  }
-  if (insertIndex > maxIndex) {
-    insertIndex = maxIndex;
-  }
-  slides.splice(insertIndex, 0, moved);
-
-  if (state.selectedAnnouncementIndex === fromIndex) {
-    state.selectedAnnouncementIndex = insertIndex;
-  } else if (
-    fromIndex < insertIndex &&
-    state.selectedAnnouncementIndex > fromIndex &&
-    state.selectedAnnouncementIndex <= insertIndex
-  ) {
-    state.selectedAnnouncementIndex -= 1;
-  } else if (
-    fromIndex > insertIndex &&
-    state.selectedAnnouncementIndex >= insertIndex &&
-    state.selectedAnnouncementIndex < fromIndex
-  ) {
-    state.selectedAnnouncementIndex += 1;
-  }
-  state.preview = { section: 'announcements', songId: null, slideIndex: state.selectedAnnouncementIndex };
-  refreshAll();
-  saveProjectIfPossible();
-}
-
 function reorderTimer(fromIndex, toIndex, position = 'before') {
   const slides = state.project.timer.slides;
   if (fromIndex < 0 || fromIndex >= slides.length) {
@@ -2449,6 +2795,7 @@ function updateSlideFromEditor() {
   slide.showLyrics = elements.showLyrics.checked;
   slide.showFooter = elements.showFooter.checked;
   slide.footerAutoCcli = elements.footerAuto.checked;
+  slide.speakerNotes = elements.speakerNotes.value.slice(0, 20000);
 
   slide.titleText = richTextFromPlain(elements.titleText.value);
   slide.lyricsText = richTextFromPlain(elements.lyricsText.value);
@@ -2486,9 +2833,9 @@ function openHtmlFilePicker() {
 
     input.addEventListener(
       'change',
-      () => {
+      async () => {
         const file = input.files && input.files[0];
-        const path = file && file.path ? file.path : null;
+        const path = await registerRendererFile(file) || null;
         document.body.removeChild(input);
         resolve(path);
       },
@@ -2509,9 +2856,9 @@ function openHtmlImagePicker() {
 
     input.addEventListener(
       'change',
-      () => {
+      async () => {
         const file = input.files && input.files[0];
-        const path = file && file.path ? file.path : null;
+        const path = await registerRendererFile(file) || null;
         document.body.removeChild(input);
         resolve(path);
       },
@@ -2532,9 +2879,9 @@ function openHtmlLyricsPicker() {
 
     input.addEventListener(
       'change',
-      () => {
+      async () => {
         const file = input.files && input.files[0];
-        const path = file && file.path ? file.path : null;
+        const path = await registerRendererFile(file) || null;
         document.body.removeChild(input);
         resolve(path);
       },
@@ -2552,7 +2899,7 @@ async function pickMediaPath() {
 
   try {
     const result = await window.api.pickMedia();
-    return result || null;
+    return result?.token || null;
   } catch (error) {
     console.error('IPC media picker failed, falling back', error);
     return openHtmlFilePicker();
@@ -2566,7 +2913,7 @@ async function pickLyricsPath() {
 
   try {
     const result = await window.api.pickLyrics();
-    return result || null;
+    return result?.token || null;
   } catch (error) {
     console.error('IPC lyrics picker failed, falling back', error);
     return openHtmlLyricsPicker();
@@ -2580,49 +2927,36 @@ async function pickAnnouncementPath() {
 
   try {
     const result = await window.api.pickAnnouncement();
-    return result || null;
+    return result?.token || null;
   } catch (error) {
     console.error('IPC announcement picker failed, falling back', error);
     return openHtmlImagePicker();
   }
 }
 
-async function applyBackgroundFromSource(sourcePath, options = {}) {
+async function applyBackgroundFromSource(sourcePath) {
   const song = getSelectedSong();
   if (!song) {
-    window.alert('Select a song before choosing a background.');
+    showNotice('Select a song before choosing a background.');
     return;
   }
   if (!sourcePath) {
     elements.backgroundPath.textContent = 'No file selected.';
     return;
   }
-  const target = options.target || 'project';
-  if (target === 'project' && !state.projectFolder) {
-    elements.backgroundPath.textContent = 'Project folder is required.';
-    return;
-  }
   elements.backgroundPath.textContent = 'Importing media...';
   let imported = null;
   try {
-    if (target === 'library') {
-      imported = await window.api.importLibrary(sourcePath);
-    } else {
-      imported = await window.api.importMedia(state.projectFolder, sourcePath);
-    }
+    imported = await window.api.importLibrary(sourcePath);
   } catch (error) {
     console.error('Failed to import media', error);
     elements.backgroundPath.textContent = 'Import failed. See console.';
-    window.alert('Import failed. Check the console for details.');
+    showNotice('The selected media could not be imported.', 'error', 'Import failed');
     return;
   }
   if (!imported || !imported.relativePath) {
     elements.backgroundPath.textContent = 'Import failed. No file path.';
     return;
-  }
-  if (imported.absolutePath) {
-    const normalized = imported.absolutePath.replace(/\\/g, '/');
-    state.runtimeBackgrounds[song.id] = `file:///${encodeURI(normalized)}`;
   }
   const ext = (imported.relativePath.split('.').pop() || '').toLowerCase();
   const videoExts = ['mp4', 'mov', 'mkv', 'avi', 'webm'];
@@ -2649,7 +2983,7 @@ async function pickBackground() {
 async function applyAnnouncementFromSource(sourcePath) {
   const slide = getSelectedAnnouncementSlide();
   if (!slide) {
-    window.alert('Select an announcement slide before choosing an image.');
+    showNotice('Select an announcement slide before choosing an image.');
     return;
   }
   if (!sourcePath) {
@@ -2663,7 +2997,7 @@ async function applyAnnouncementFromSource(sourcePath) {
   } catch (error) {
     console.error('Failed to import announcement media', error);
     elements.announcementPath.textContent = 'Import failed. See console.';
-    window.alert('Import failed. Check the console for details.');
+    showNotice('The selected announcement image could not be imported.', 'error', 'Import failed');
     return;
   }
   if (!imported || !imported.relativePath) {
@@ -2693,7 +3027,7 @@ async function pickAnnouncementMedia() {
 async function applyTimerMediaFromSource(sourcePath) {
   const slide = getSelectedTimerSlide();
   if (!slide) {
-    window.alert('Select a timer slide before choosing media.');
+    showNotice('Select a countdown slide before choosing media.');
     return;
   }
   if (!sourcePath) {
@@ -2707,7 +3041,7 @@ async function applyTimerMediaFromSource(sourcePath) {
   } catch (error) {
     console.error('Failed to import timer media', error);
     elements.timerMediaPath.textContent = 'Import failed. See console.';
-    window.alert('Import failed. Check the console for details.');
+    showNotice('The selected countdown media could not be imported.', 'error', 'Import failed');
     return;
   }
   if (!imported || !imported.relativePath) {
@@ -2788,25 +3122,26 @@ async function handleLyricsDrop(event) {
   }
   event.preventDefault();
   event.stopPropagation();
-  const textFiles = files.filter((file) => isTextFileName(file.name || file.path || ''));
-  const pptxFiles = files.filter((file) => isPowerPointFileName(file.name || file.path || ''));
-  const pptFiles = files.filter((file) => isLegacyPowerPointFileName(file.name || file.path || ''));
-  const imageFiles = files.filter((file) => isImageFileName(file.name || file.path || ''));
+  const textFiles = files.filter((file) => isTextFileName(file.name || ''));
+  const pptxFiles = files.filter((file) => isPowerPointFileName(file.name || ''));
+  const pptFiles = files.filter((file) => isLegacyPowerPointFileName(file.name || ''));
+  const imageFiles = files.filter((file) => isImageFileName(file.name || ''));
   if (textFiles.length === 0 && pptxFiles.length === 0 && imageFiles.length === 0) {
     if (pptFiles.length > 0) {
-      window.alert('PowerPoint .ppt files are not supported. Please save as .pptx.');
+      showNotice('PowerPoint .ppt files are not supported. Save the presentation as .pptx and try again.');
     } else {
-      window.alert('Only .txt lyric files, .pptx PowerPoint files, or image files are supported.');
+      showNotice('Only .txt lyric files, .pptx PowerPoint files, or image files are supported.');
     }
     return;
   }
   if (pptFiles.length > 0) {
-    window.alert('PowerPoint .ppt files are not supported. Please save as .pptx.');
+    showNotice('PowerPoint .ppt files are not supported. Save the presentation as .pptx and try again.');
   }
 
   for (const file of textFiles) {
-    if (file.path) {
-      await importLyricsFromFile(file.path, { forceNew: true });
+    const filePath = await registerRendererFile(file);
+    if (filePath) {
+      await importLyricsFromFile(filePath, { forceNew: true });
     } else if (file.text) {
       const text = await file.text();
       await importLyricsFromText(text, { forceNew: true });
@@ -2820,31 +3155,33 @@ async function handleLyricsDrop(event) {
   if (imageFiles.length > 0) {
     if (state.selectedSection === 'announcements') {
       for (const file of imageFiles) {
-        if (!file.path) {
-          window.alert('Dropped images need a file path to import.');
+        const filePath = await registerRendererFile(file);
+        if (!filePath) {
+          showNotice('The dropped image could not be read.', 'error', 'Drop failed');
           return;
         }
         addAnnouncementSlide();
-        await applyAnnouncementFromSource(file.path);
+        await applyAnnouncementFromSource(filePath);
       }
     } else if (state.selectedSection === 'setlist') {
       const song = getSelectedSong();
       if (!song) {
         if (!state.project.setlist || state.project.setlist.length === 0) {
-          window.alert('Import or create a song before setting a background.');
+          showNotice('Import or create a song before setting a background.');
         } else {
-          window.alert('Select a song before setting a background.');
+          showNotice('Select a song before setting a background.');
         }
         return;
       }
       const file = imageFiles[0];
-      if (!file.path) {
-        window.alert('Dropped images need a file path to import.');
+      const filePath = await registerRendererFile(file);
+      if (!filePath) {
+        showNotice('The dropped image could not be read.', 'error', 'Drop failed');
         return;
       }
-      await applyBackgroundFromSource(file.path, { target: 'library' });
+      await applyBackgroundFromSource(filePath, { target: 'library' });
     } else {
-      window.alert('Select Announcements or a song in the setlist to use dropped images.');
+      showNotice('Select Announcements or a song in the setlist before dropping images.');
     }
   }
 }
@@ -3091,14 +3428,11 @@ async function importLyricsFromFile(filePath, options = {}) {
     let text = '';
     if (window.api && window.api.readTextFile) {
       text = await window.api.readTextFile(filePath);
-    } else if (window.require) {
-      const fs = window.require('fs');
-      text = fs.readFileSync(filePath, 'utf8');
     }
     await importLyricsFromText(text, options);
   } catch (error) {
     console.error('Failed to import lyrics file', error);
-    window.alert('Failed to import lyrics file. Check the console for details.');
+    showNotice('The lyrics file could not be imported.', 'error', 'Lyrics import failed');
   }
 }
 
@@ -3288,60 +3622,13 @@ function parsePowerPointSlides(slideBlocks = []) {
   };
 }
 
-async function readPowerPointFileData(file) {
-  if (!file) {
-    return null;
-  }
-  if (file.arrayBuffer) {
-    return await file.arrayBuffer();
-  }
-  const filePath = typeof file === 'string' ? file : file.path;
-  if (filePath && window.require) {
-    const fs = window.require('fs');
-    return await fs.promises.readFile(filePath);
-  }
-  return null;
-}
-
 async function loadPowerPointSlides(file) {
-  const filePath = typeof file === 'string' ? file : file?.path;
+  const filePath = typeof file === 'string' ? file : await registerRendererFile(file);
   if (window.api && window.api.readPptxSlides && filePath) {
     const xmlSlides = await window.api.readPptxSlides(filePath);
     return xmlSlides.map((xml) => extractSlideTextBlocks(xml));
   }
-  const data = await readPowerPointFileData(file);
-  if (!data) {
-    return [];
-  }
-  if (!window.require) {
-    return [];
-  }
-  const JSZip = window.require('jszip');
-  const zip = await JSZip.loadAsync(data);
-  const fileEntries = Object.keys(zip.files).map((path) => ({
-    path,
-    normalized: path.replace(/\\/g, '/')
-  }));
-  let slideEntries = fileEntries.filter(({ normalized }) => /ppt\/slides\/slide\d+\.xml$/i.test(normalized));
-  if (slideEntries.length === 0) {
-    slideEntries = fileEntries.filter(
-      ({ normalized }) =>
-        /ppt\/slides\/[^/]+\.xml$/i.test(normalized) && !/ppt\/slides\/_rels\//i.test(normalized)
-    );
-  }
-  slideEntries.sort((a, b) => {
-    const aMatch = a.normalized.match(/slide(\d+)\.xml$/i);
-    const bMatch = b.normalized.match(/slide(\d+)\.xml$/i);
-    const aIndex = aMatch ? Number(aMatch[1]) : 0;
-    const bIndex = bMatch ? Number(bMatch[1]) : 0;
-    return aIndex - bIndex;
-  });
-  const slides = [];
-  for (const entry of slideEntries) {
-    const xml = await zip.file(entry.path).async('string');
-    slides.push(extractSlideTextBlocks(xml));
-  }
-  return slides;
+  return [];
 }
 
 function applyPowerPointImport(parsed, options = {}) {
@@ -3405,18 +3692,18 @@ async function importPowerPointFromFile(file, options = {}) {
   try {
     const slides = await loadPowerPointSlides(file);
     if (!slides.length) {
-      window.alert('No slides found in the PowerPoint file.');
+      showNotice('No slides were found in the PowerPoint file.');
       return;
     }
     const parsed = parsePowerPointSlides(slides);
     if (!parsed) {
-      window.alert('No text found in the PowerPoint file.');
+      showNotice('The PowerPoint slides did not contain readable text.');
       return;
     }
     applyPowerPointImport(parsed, options);
   } catch (error) {
     console.error('Failed to import PowerPoint file', error);
-    window.alert('Failed to import PowerPoint file. Check the console for details.');
+    showNotice('The PowerPoint file could not be imported.', 'error', 'PowerPoint import failed');
   }
 }
 
@@ -3431,7 +3718,7 @@ async function importLyrics() {
 function applyBackgroundFromLibraryPath(relativePath) {
   const song = getSelectedSong();
   if (!song) {
-    window.alert('Select a song before choosing a background.');
+    showNotice('Select a song before choosing a background.');
     return;
   }
   if (!relativePath) {
@@ -3442,7 +3729,6 @@ function applyBackgroundFromLibraryPath(relativePath) {
   const videoExts = ['mp4', 'mov', 'mkv', 'avi', 'webm'];
   song.background.type = videoExts.includes(ext) ? 'video' : 'image';
   song.background.path = relativePath;
-  delete state.runtimeBackgrounds[song.id];
   state.preview = { section: 'setlist', songId: song.id, slideIndex: state.selectedSlideIndex || 0 };
   renderInspector();
   updatePreview();
@@ -3454,7 +3740,7 @@ function applyBackgroundFromLibraryPath(relativePath) {
 function applyAnnouncementFromLibraryPath(relativePath) {
   const slide = getSelectedAnnouncementSlide();
   if (!slide) {
-    window.alert('Select an announcement slide before choosing an image.');
+    showNotice('Select an announcement slide before choosing an image.');
     return;
   }
   if (!relativePath) {
@@ -3474,7 +3760,7 @@ function applyAnnouncementFromLibraryPath(relativePath) {
 function applyTimerFromLibraryPath(relativePath) {
   const slide = getSelectedTimerSlide();
   if (!slide) {
-    window.alert('Select a timer slide before choosing media.');
+    showNotice('Select a countdown slide before choosing media.');
     return;
   }
   if (!relativePath) {
@@ -3486,20 +3772,6 @@ function applyTimerFromLibraryPath(relativePath) {
   slide.mediaType = videoExts.includes(ext) ? 'video' : 'image';
   slide.mediaPath = relativePath;
   renderTimerSlides();
-  renderInspector();
-  updatePreview();
-  sendProgramStateIfLive();
-  saveProjectIfPossible();
-  scheduleAssetCheck();
-}
-
-function clearBackground() {
-  const song = getSelectedSong();
-  if (!song) {
-    return;
-  }
-  song.background.path = '';
-  delete state.runtimeBackgrounds[song.id];
   renderInspector();
   updatePreview();
   sendProgramStateIfLive();
@@ -3610,6 +3882,15 @@ function updateTimerSettings() {
   if (state.live.section === 'timer') {
     updateAutoAdvanceTimers();
   }
+  saveProjectIfPossible();
+}
+
+function updateMediaSpeakerNotes(section) {
+  const slide = section === 'announcements' ? getSelectedAnnouncementSlide() : getSelectedTimerSlide();
+  const input = section === 'announcements' ? elements.announcementSpeakerNotes : elements.timerSpeakerNotes;
+  if (!slide || !input) return;
+  slide.speakerNotes = input.value.slice(0, 20000);
+  sendProgramStateIfLive();
   saveProjectIfPossible();
 }
 
@@ -3733,7 +4014,7 @@ function previousPreview() {
   }
 }
 
-function advanceLive(options = {}) {
+function advanceLive(_options = {}) {
   const selection = getLiveSelection();
   if (!selection) {
     advancePreview();
@@ -3935,6 +4216,8 @@ function goLive(options = {}) {
   if (state.panic) {
     state.panic = false;
     elements.panic.textContent = 'Panic';
+    elements.panic.setAttribute('aria-pressed', 'false');
+    document.body.dataset.panic = 'false';
   }
   if (document.activeElement && typeof document.activeElement.blur === 'function') {
     document.activeElement.blur();
@@ -3993,7 +4276,9 @@ function sendProgramStateIfLive() {
 
 function togglePanic() {
   state.panic = !state.panic;
-  elements.panic.textContent = state.panic ? 'Panic (ON)' : 'Panic';
+  elements.panic.textContent = state.panic ? 'Blackout On' : 'Panic';
+  elements.panic.setAttribute('aria-pressed', state.panic ? 'true' : 'false');
+  document.body.dataset.panic = state.panic ? 'true' : 'false';
   sendProgramState();
 }
 
@@ -4004,7 +4289,8 @@ async function refreshDisplays(options = {}) {
   }
   const displays = await window.api.listDisplays();
   const previousSelection = state.displayTarget;
-  elements.displaySelect.innerHTML = '';
+  elements.displaySelect.replaceChildren();
+  elements.stageDisplaySelect?.replaceChildren();
   const hasExternalDisplays = displays.length > 1;
   const externalOption = document.createElement('option');
   externalOption.value = DISPLAY_TARGET_ALL_EXTERNAL;
@@ -4017,12 +4303,21 @@ async function refreshDisplays(options = {}) {
     option.value = String(display.id);
     option.textContent = display.label;
     elements.displaySelect.appendChild(option);
+    if (elements.stageDisplaySelect) {
+      const stageOption = document.createElement('option');
+      stageOption.value = String(display.id);
+      stageOption.textContent = display.isOperator ? `${display.label} (operator)` : display.label;
+      elements.stageDisplaySelect.appendChild(stageOption);
+    }
   });
   if (displays.length === 0) {
     state.displayTarget = null;
     if (!skipSetProgramDisplay && window.api && window.api.setProgramDisplay) {
       window.api.setProgramDisplay(null);
     }
+    state.stageDisplayTarget = null;
+    if (elements.stageDisplaySelect) elements.stageDisplaySelect.disabled = true;
+    if (elements.toggleStageDisplay) elements.toggleStageDisplay.disabled = true;
     return;
   }
   const displayIdSet = new Set(displays.map((display) => String(display.id)));
@@ -4046,34 +4341,198 @@ async function refreshDisplays(options = {}) {
   if (!skipSetProgramDisplay && window.api && window.api.setProgramDisplay && previousSelection !== nextValue) {
     window.api.setProgramDisplay(nextValue);
   }
+
+  const previousStageTarget = state.stageDisplayTarget == null ? null : String(state.stageDisplayTarget);
+  const fallbackStageDisplay = displays.find((display) => !display.isOperator) || displays[0];
+  const nextStageTarget = previousStageTarget && displayIdSet.has(previousStageTarget)
+    ? previousStageTarget
+    : String(fallbackStageDisplay.id);
+  state.stageDisplayTarget = nextStageTarget;
+  if (elements.stageDisplaySelect) {
+    elements.stageDisplaySelect.disabled = false;
+    elements.stageDisplaySelect.value = nextStageTarget;
+  }
+  if (elements.toggleStageDisplay) elements.toggleStageDisplay.disabled = false;
+  if (previousStageTarget !== nextStageTarget) window.api?.setStageDisplay?.(nextStageTarget);
+}
+
+function updateStageDisplayControls() {
+  if (!elements.toggleStageDisplay) return;
+  elements.toggleStageDisplay.setAttribute('aria-pressed', state.stageVisible ? 'true' : 'false');
+  elements.toggleStageDisplay.textContent = state.stageVisible ? 'Hide Stage' : 'Stage View';
+}
+
+async function initializeStageDisplay() {
+  try {
+    const config = await window.api?.getStageConfig?.();
+    state.stageDisplayTarget = config?.displayTarget ?? null;
+    state.stageVisible = config?.visible === true;
+  } catch (error) {
+    console.error('Failed to load stage display settings', error);
+  }
+  updateStageDisplayControls();
+  await refreshDisplays();
+  sendStageState();
+}
+
+function updateProjectPathLabel() {
+  const base = state.projectFile || state.projectFolder || 'Unsaved session';
+  const displayName = base === 'Unsaved session' ? base : base.split(/[\\/]/).pop();
+  elements.projectPath.textContent = displayName;
+  elements.projectPath.title = base;
+}
+
+function setSaveState(saveState) {
+  if (!elements.saveStatus) return;
+  const labels = { dirty: 'Unsaved changes', saving: 'Saving...', saved: 'Saved', error: 'Save failed' };
+  elements.saveStatus.dataset.state = saveState;
+  elements.saveStatus.textContent = labels[saveState] || 'Ready';
+}
+
+function setProjectDirty(dirty) {
+  state.dirty = dirty === true;
+  if (!state.dirty) clearRecoveryTimer();
+  updateProjectPathLabel();
+  setSaveState(state.dirty ? 'dirty' : 'saved');
+  window.api?.setProjectDirty?.(state.dirty);
+}
+
+function clearRecoveryTimer() {
+  if (!recoveryTimer) return;
+  window.clearTimeout(recoveryTimer);
+  recoveryTimer = null;
+}
+
+async function writeRecoverySnapshot() {
+  if (!state.dirty || !window.api?.writeRecovery) return;
+  const revision = projectRevision;
+  const snapshot = structuredClone(state.project);
+  try {
+    await window.api.writeRecovery(snapshot);
+    recoveryErrorShown = false;
+  } catch (error) {
+    console.error('Failed to write recovery snapshot', error);
+    if (!recoveryErrorShown) {
+      recoveryErrorShown = true;
+      showNotice(
+        'Automatic recovery could not save a snapshot. Save the session to a project file to protect your work.',
+        'error',
+        'Recovery unavailable'
+      );
+    }
+  } finally {
+    recoveryWritePromise = null;
+    if (state.dirty && revision !== projectRevision) scheduleRecoverySnapshot();
+  }
+}
+
+function scheduleRecoverySnapshot() {
+  if (!window.api?.writeRecovery || !state.dirty) return;
+  clearRecoveryTimer();
+  recoveryTimer = window.setTimeout(() => {
+    recoveryTimer = null;
+    if (!state.dirty) return;
+    if (recoveryWritePromise) {
+      scheduleRecoverySnapshot();
+      return;
+    }
+    recoveryWritePromise = writeRecoverySnapshot();
+  }, 600);
+}
+
+async function runSaveLoop() {
+  let lastPath = null;
+  try {
+    while (saveRequested) {
+      saveRequested = false;
+      setSaveState('saving');
+      const revision = projectRevision;
+      const snapshot = structuredClone(state.project);
+      const filePath = await window.api.saveProjectFile(snapshot);
+      if (!filePath) {
+        setSaveState('error');
+        return null;
+      }
+      lastPath = filePath;
+      state.projectFile = filePath;
+      state.autoSaveEnabled = true;
+      updateProjectPathLabel();
+      if (revision === projectRevision && !saveRequested) {
+        setProjectDirty(false);
+        await window.api.clearRecovery?.().catch((error) => {
+          console.error('Failed to clear recovery snapshot after save', error);
+        });
+      }
+    }
+  } catch (error) {
+    console.error('Failed to save project', error);
+    setSaveState('error');
+    showNotice('The session could not be saved. Your unsaved edits are still open.', 'error', 'Save failed');
+    return null;
+  }
+  return lastPath;
+}
+
+function queueProjectSave() {
+  saveRequested = true;
+  if (!saveLoopPromise) {
+    saveLoopPromise = runSaveLoop().finally(() => {
+      saveLoopPromise = null;
+    });
+  }
+  return saveLoopPromise;
 }
 
 function saveProjectIfPossible() {
-  if (!state.projectFile || !state.autoSaveEnabled) {
-    return;
-  }
+  projectRevision += 1;
+  setProjectDirty(true);
+  scheduleRecoverySnapshot();
+  if (!state.projectFile || !state.autoSaveEnabled) return;
   if (saveTimer) {
     window.clearTimeout(saveTimer);
   }
   saveTimer = window.setTimeout(() => {
-    window.api.saveProjectFile(state.projectFile, state.project, { projectFolder: state.projectFolder });
     saveTimer = null;
+    queueProjectSave();
   }, 400);
 }
 
 async function saveProject() {
   if (!window.api || !window.api.saveProjectFile) {
-    return;
+    return false;
   }
-  const filePath = await window.api.saveProjectFile(state.projectFile, state.project, { projectFolder: state.projectFolder });
+  if (saveTimer) {
+    window.clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const filePath = await queueProjectSave();
   if (!filePath) {
-    return;
+    return false;
   }
   state.projectFile = filePath;
-  elements.projectPath.textContent = filePath;
+  updateProjectPathLabel();
+  return !state.dirty;
+}
+
+async function confirmProjectTransition() {
+  if (!state.dirty) return true;
+  const choice = await window.api?.confirmProjectTransition?.();
+  if (choice === 'save') return saveProject();
+  if (choice !== 'discard') return false;
+  if (saveTimer) {
+    window.clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  clearRecoveryTimer();
+  if (saveLoopPromise) await saveLoopPromise;
+  return true;
 }
 
 async function createProject() {
+  if (!await confirmProjectTransition()) return;
+  if (window.api?.resetSession) {
+    await window.api.resetSession();
+  }
   const project = createNewProject();
   setProject(project, null, null);
 }
@@ -4082,11 +4541,35 @@ async function openProject() {
   if (!window.api || !window.api.openProjectFile) {
     return;
   }
+  if (!await confirmProjectTransition()) return;
   const payload = await window.api.openProjectFile();
   if (!payload || !payload.project) {
     return;
   }
   setProject(payload.project, payload.filePath || null, null);
+}
+
+async function openRecentProject(id) {
+  if (!window.api?.openRecentProject || !await confirmProjectTransition()) return;
+  clearRecoveryTimer();
+  const payload = await window.api.openRecentProject(id);
+  if (!payload?.project) return;
+  setProject(payload.project, payload.filePath || null, null);
+}
+
+async function restoreRecoveryAtStartup() {
+  if (!window.api?.checkRecovery) return;
+  try {
+    const payload = await window.api.checkRecovery();
+    if (!payload?.project) return;
+    setProject(payload.project, payload.filePath || null, null);
+    projectRevision += 1;
+    setProjectDirty(true);
+    showNotice('Unsaved work from the previous session was restored. Save the project to keep it.', 'success', 'Session recovered');
+  } catch (error) {
+    console.error('Failed to restore recovery snapshot', error);
+    showNotice('The recovery snapshot could not be opened.', 'error', 'Recovery failed');
+  }
 }
 
 function sendEditCommand(command) {
@@ -4103,6 +4586,7 @@ function handleKeydown(event) {
   if (event.defaultPrevented) {
     return;
   }
+  if (elements.songLibraryDialog?.open) return;
   const key = event.key ? event.key.toLowerCase() : '';
   const hasModifier = event.ctrlKey || event.metaKey;
   if (hasModifier) {
@@ -4224,6 +4708,26 @@ function bindEvents() {
     });
   }
   elements.addSong.addEventListener('click', addSong);
+  elements.openSongLibrary?.addEventListener('click', openSongLibraryDialog);
+  elements.saveSongLibrary?.addEventListener('click', saveSelectedSongToLibrary);
+  elements.closeSongLibrary?.addEventListener('click', closeSongLibraryDialog);
+  elements.addLibrarySong?.addEventListener('click', addSelectedLibrarySong);
+  elements.deleteLibrarySong?.addEventListener('click', deleteSelectedLibrarySong);
+  elements.songLibrarySearch?.addEventListener('input', () => {
+    if (songLibrarySearchTimer) window.clearTimeout(songLibrarySearchTimer);
+    songLibrarySearchTimer = window.setTimeout(() => {
+      songLibrarySearchTimer = null;
+      refreshSongLibrary();
+    }, 160);
+  });
+  elements.songLibraryDialog?.addEventListener('close', () => {
+    selectedLibrarySongId = null;
+    songLibraryRequestToken += 1;
+    if (songLibrarySearchTimer) {
+      window.clearTimeout(songLibrarySearchTimer);
+      songLibrarySearchTimer = null;
+    }
+  });
   elements.songTitle.addEventListener('input', updateSongTitle);
   elements.addSlide.addEventListener('click', addSlide);
 
@@ -4235,7 +4739,8 @@ function bindEvents() {
     elements.titleText,
     elements.lyricsText,
     elements.footerText,
-    elements.footerAuto
+    elements.footerAuto,
+    elements.speakerNotes
   ].forEach((input) => input.addEventListener('input', updateSlideFromEditor));
 
   [elements.showTitle, elements.showLyrics, elements.showFooter].forEach((input) => {
@@ -4331,6 +4836,7 @@ function bindEvents() {
   if (elements.announcementHideLoop) {
     elements.announcementHideLoop.addEventListener('change', updateAnnouncementSlideSettings);
   }
+  elements.announcementSpeakerNotes?.addEventListener('input', () => updateMediaSpeakerNotes('announcements'));
   if (elements.timerAutoVideo) {
     elements.timerAutoVideo.addEventListener('change', updateTimerSettings);
   }
@@ -4340,6 +4846,7 @@ function bindEvents() {
   if (elements.timerAdvance) {
     elements.timerAdvance.addEventListener('input', updateTimerSettings);
   }
+  elements.timerSpeakerNotes?.addEventListener('input', () => updateMediaSpeakerNotes('timer'));
 
   if (elements.showProgram) {
     elements.showProgram.addEventListener('click', () => {
@@ -4357,6 +4864,7 @@ function bindEvents() {
       state.live = { section: null, songId: null, slideIndex: 0 };
       updateLiveStatus();
       updateAutoAdvanceTimers();
+      sendStageState(null);
     });
   }
   elements.goLive.addEventListener('click', goLive);
@@ -4396,6 +4904,22 @@ function bindEvents() {
     const value = event.target.value;
     state.displayTarget = value;
     window.api.setProgramDisplay(state.displayTarget);
+  });
+  elements.stageDisplaySelect?.addEventListener('change', (event) => {
+    state.stageDisplayTarget = event.target.value;
+    window.api?.setStageDisplay?.(state.stageDisplayTarget);
+  });
+  elements.toggleStageDisplay?.addEventListener('click', () => {
+    if (state.stageVisible) {
+      window.api?.hideStage?.();
+      state.stageVisible = false;
+    } else {
+      window.api?.showStage?.(state.stageDisplayTarget);
+      state.stageVisible = true;
+      sendStageState();
+      window.setTimeout(() => sendStageState(), 300);
+    }
+    updateStageDisplayControls();
   });
 
   document.addEventListener('keydown', handleKeydown);
@@ -4520,18 +5044,12 @@ function bindEvents() {
 }
 
 bindEvents();
-refreshDisplays();
+initializeContextAccordions();
+initializeStageDisplay();
 refreshAll();
 setThemeSectionCollapsed(false);
 setCcliSectionCollapsed(true);
 applyVersionLabel();
-
-if (window.api && window.api.ensureLibraryRoots) {
-  window.api.ensureLibraryRoots().then(() => {
-    refreshAll();
-    sendProgramStateIfLive();
-  });
-}
 
 if (window.api && window.api.onDisplayChanged) {
   window.api.onDisplayChanged((payload) => {
@@ -4569,6 +5087,7 @@ if (window.api && window.api.onLibrarySelected) {
         state.live = { section: null, songId: null, slideIndex: 0 };
         updateLiveStatus();
         updateAutoAdvanceTimers();
+        sendStageState(null);
         return;
       }
       if (payload.type !== 'video-ended') {
@@ -4599,7 +5118,29 @@ if (window.api && window.api.onMenuAction) {
       openProject();
     } else if (action === 'save-project') {
       saveProject();
+    } else if (typeof action === 'string' && action.startsWith('open-recent:')) {
+      openRecentProject(action.slice('open-recent:'.length));
     }
+  });
+}
+
+if (window.api?.onStageEvent) {
+  window.api.onStageEvent((payload) => {
+    if (!payload) return;
+    if (payload.type === 'stage-hidden') state.stageVisible = false;
+    if (payload.type === 'stage-display-changed') {
+      state.stageVisible = payload.visible === true;
+      if (payload.displayTarget != null) state.stageDisplayTarget = String(payload.displayTarget);
+      refreshDisplays({ skipSetProgramDisplay: true });
+    }
+    updateStageDisplayControls();
+  });
+}
+
+if (window.api?.onSaveBeforeClose) {
+  window.api.onSaveBeforeClose(async () => {
+    const saved = await saveProject();
+    window.api.completeProjectClose?.(saved);
   });
 }
 
@@ -4621,4 +5162,6 @@ window.addEventListener('resize', () => {
   updatePreviewScale();
   updatePreview();
 });
+
+restoreRecoveryAtStartup();
 

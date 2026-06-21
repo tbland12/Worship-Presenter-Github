@@ -3,53 +3,91 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: worship-media:; media-src 'self' blob: worship-media:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'" />
     <title>Worship Presenter</title>
     <link rel="stylesheet" href="operator.css" />
+    <link rel="stylesheet" href="shared/ui.css" />
     <link rel="stylesheet" href="shared/stage.css" />
   </head>
   <body>
     <div class="app">
       <header class="app-header">
         <div class="brand">
-          <div class="brand-title">Worship Presenter</div>
-          <div class="brand-sub">Offline Slides Studio</div>
+          <span class="brand-motif" aria-hidden="true"></span>
+          <div>
+            <div class="brand-title">Worship Presenter</div>
+            <div class="brand-sub">Service production workspace</div>
+          </div>
         </div>
+        <nav class="file-actions" aria-label="Session actions">
+          <button id="new-project" type="button" title="New session (Ctrl+N)">New</button>
+          <button id="open-project" type="button" title="Open session (Ctrl+O)">Open</button>
+          <button id="save-project" type="button" class="save-action" title="Save session (Ctrl+S)">Save</button>
+        </nav>
         <div class="header-actions">
           <span class="badge warning" id="asset-warning" hidden>Missing media</span>
-          <div class="project-path" id="project-path">No project folder</div>
+          <div class="project-meta">
+            <div class="project-path" id="project-path" title="Unsaved session">Unsaved session</div>
+            <span class="save-status" id="save-status" data-state="saved" role="status">Ready</span>
+          </div>
+          <button class="appearance-toggle" id="appearance-toggle" type="button" aria-label="Switch appearance">
+            <svg class="appearance-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true">
+              <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6 7 7M17 17l1.4 1.4M18.4 5.6 17 7M7 17l-1.4 1.4" />
+              <circle cx="12" cy="12" r="4" />
+            </svg>
+          </button>
         </div>
       </header>
 
       <div class="presenter-bar presenter-top">
-        <div class="presenter-controls">
-          <button id="hide-program">Hide Program</button>
-          <button id="go-live" class="primary">Go Live</button>
-          <button id="prev-slide">Prev</button>
-          <button id="next-slide">Next</button>
-          <button id="panic" class="panic">Panic</button>
-          <label class="small"><input id="follow-live" type="checkbox" /> Follow Live</label>
-          <label class="small"><input id="auto-go-live" type="checkbox" /> Advance goes live</label>
+        <div class="live-readout">
+          <span class="live-dot" aria-hidden="true"></span>
+          <div>
+            <span class="live-kicker">Program output</span>
+            <span class="status-pill" id="live-status" role="status" aria-live="polite">Not live</span>
+          </div>
         </div>
-        <div class="presenter-controls">
-          <label class="small" for="display-select">Program Display</label>
+        <div class="presenter-controls live-actions">
+          <button id="hide-program" class="secondary" title="Hide output (Esc)">Hide Output</button>
+          <button id="prev-slide" class="nav-control" title="Previous slide (Left Arrow)"><span aria-hidden="true">‹</span> Prev</button>
+          <button id="go-live" class="primary" title="Take preview live (Enter)">Go Live</button>
+          <button id="next-slide" class="nav-control" title="Next slide (Space)">Next <span aria-hidden="true">›</span></button>
+          <button id="panic" class="panic" aria-pressed="false" title="Black out the program output">Panic</button>
+        </div>
+        <div class="presenter-controls output-options">
+          <label class="display-field" for="display-select"><span>Display</span>
           <select id="display-select"></select>
-          <span class="status-pill" id="live-status">Live: -</span>
+          </label>
+          <button id="toggle-stage-display" class="secondary" type="button" aria-pressed="false">Stage View</button>
+          <label class="display-field stage-display-field" for="stage-display-select"><span>Stage</span>
+            <select id="stage-display-select" aria-label="Stage display"></select>
+          </label>
+          <label class="compact-check"><input id="follow-live" type="checkbox" /> Follow live</label>
+          <label class="compact-check"><input id="auto-go-live" type="checkbox" /> Auto-take</label>
         </div>
       </div>
 
       <main class="app-body">
         <section class="panel setlist-panel">
-          <h3>Lineup</h3>
+          <div class="panel-heading">
+            <div>
+              <span class="eyebrow">Service flow</span>
+              <h3>Rundown</h3>
+            </div>
+          </div>
 
           <div class="lineup-buttons">
-            <button id="select-announcements" type="button">Announcements</button>
-            <button id="select-timer" type="button">Timer</button>
+            <button id="select-announcements" type="button"><span>Announcements</span><span class="count-badge" id="announcement-count">0</span></button>
+            <button id="select-timer" type="button"><span>Countdown</span><span class="count-badge" id="timer-count">0</span></button>
           </div>
 
           <div class="section-block">
             <div class="section-header">
-              <span>Setlist</span>
-              <button id="add-song" type="button">Add Song</button>
+              <span>Setlist <span class="count-inline" id="setlist-count">0</span></span>
+              <div class="section-header-actions">
+                <button id="open-song-library" type="button">Library</button>
+                <button id="add-song" type="button">Add Song</button>
+              </div>
             </div>
             <ul class="list" id="setlist"></ul>
             <div class="empty-hint" id="setlist-empty">
@@ -60,17 +98,33 @@
         </section>
 
         <section class="panel editor-panel">
-          <h3 id="editor-title">Song Editor</h3>
+          <div class="panel-heading editor-heading">
+            <div>
+              <span class="eyebrow">Workspace</span>
+              <h3 id="editor-title">Song Editor</h3>
+            </div>
+            <span class="preview-mode">Preview</span>
+          </div>
           <div class="preview-wrap" id="preview-wrap">
+            <div class="preview-card preview-card-adjacent preview-card-previous" id="preview-card-previous" aria-hidden="true">
+              <div class="preview-stage" id="preview-stage-previous"></div>
+            </div>
             <div class="preview-card" id="preview-card">
               <div class="preview-stage" id="preview-stage"></div>
+            </div>
+            <div class="preview-card preview-card-adjacent preview-card-next" id="preview-card-next" aria-hidden="true">
+              <div class="preview-stage" id="preview-stage-next"></div>
             </div>
           </div>
           <div class="panel-splitter" id="preview-splitter" aria-label="Resize preview" role="separator"></div>
           <div class="editor-section" id="song-editor">
             <div class="form-row">
               <label for="song-title">Song Title</label>
-              <input id="song-title" type="text" placeholder="Amazing Grace" />
+              <div class="song-title-controls">
+                <input id="song-title" type="text" placeholder="Amazing Grace" />
+                <button id="save-song-library" type="button">Save to Library</button>
+              </div>
+              <span class="small" id="song-library-status">Not linked to library</span>
             </div>
             <div class="editor-grid">
               <div>
@@ -110,6 +164,10 @@
                   </label>
                   <textarea id="footer-text" rows="2" placeholder="CCLI footer"></textarea>
                 </div>
+                <div class="form-row" id="speaker-notes-row">
+                  <label for="speaker-notes">Speaker Notes</label>
+                  <textarea id="speaker-notes" rows="3" maxlength="20000" placeholder="Private notes for the confidence monitor"></textarea>
+                </div>
               </div>
             </div>
           </div>
@@ -138,11 +196,20 @@
         </section>
 
         <section class="panel inspector-panel">
-          <h3>Inspector</h3>
-          <span class="badge" id="song-status">No song selected</span>
+          <div class="panel-heading inspector-heading">
+            <div>
+              <span class="eyebrow">Selection</span>
+              <h3>Inspector</h3>
+            </div>
+            <span class="badge" id="song-status">No selection</span>
+          </div>
           <div class="empty-hint" id="inspector-empty" hidden>Select a song or slide to edit its settings.</div>
 
           <div class="inspector-group" id="background-inspector">
+            <button class="section-toggle" type="button" aria-expanded="true" data-accordion-target="background-section">
+              <span>Media</span><span class="chevron" aria-hidden="true">v</span>
+            </button>
+            <div class="section-body" id="background-section">
             <div class="form-row">
               <label>Background</label>
               <div class="inline-controls">
@@ -151,9 +218,14 @@
               </div>
               <div class="small" id="background-path">No background selected</div>
             </div>
+            </div>
           </div>
 
           <div class="inspector-group" id="announcement-inspector" hidden>
+            <button class="section-toggle" type="button" aria-expanded="true" data-accordion-target="announcement-section">
+              <span>Media &amp; Playback</span><span class="chevron" aria-hidden="true">v</span>
+            </button>
+            <div class="section-body" id="announcement-section">
             <div class="form-row">
               <label>Announcements Library</label>
               <div class="inline-controls">
@@ -178,9 +250,18 @@
                 Hide during loop
               </label>
             </div>
+            <div class="form-row">
+              <label for="announcement-speaker-notes">Speaker Notes</label>
+              <textarea id="announcement-speaker-notes" rows="3" maxlength="20000" placeholder="Private stage-display notes"></textarea>
+            </div>
+            </div>
           </div>
 
           <div class="inspector-group" id="timer-inspector" hidden>
+            <button class="section-toggle" type="button" aria-expanded="true" data-accordion-target="timer-section">
+              <span>Media &amp; Playback</span><span class="chevron" aria-hidden="true">v</span>
+            </button>
+            <div class="section-body" id="timer-section">
             <div class="form-row">
               <label>Timer Media</label>
               <div class="inline-controls">
@@ -205,11 +286,16 @@
               <label for="timer-advance">Image advance (sec)</label>
               <input id="timer-advance" type="number" min="3" max="120" />
             </div>
+            <div class="form-row">
+              <label for="timer-speaker-notes">Speaker Notes</label>
+              <textarea id="timer-speaker-notes" rows="3" maxlength="20000" placeholder="Private stage-display notes"></textarea>
+            </div>
+            </div>
           </div>
 
           <div class="inspector-group" id="theme-group">
             <button class="section-toggle" id="theme-toggle" type="button" aria-expanded="true">
-              <span>Theme</span>
+              <span>Typography</span>
               <span class="chevron" aria-hidden="true">v</span>
             </button>
             <div class="section-body" id="theme-section">
@@ -247,14 +333,14 @@
                 <div class="field">
                   <label>Position</label>
                   <div class="position-toggle" id="theme-position">
-                    <button type="button" class="active" data-value="center" aria-pressed="true" aria-label="Top">
+                    <button type="button" class="active" data-value="center" aria-pressed="true" aria-label="Center">
                       <span class="pos-icon pos-center">
                         <span class="pos-line"></span>
                         <span class="pos-line"></span>
                         <span class="pos-line"></span>
                       </span>
                     </button>
-                    <button type="button" data-value="lower-third" aria-pressed="false" aria-label="Center">
+                    <button type="button" data-value="lower-third" aria-pressed="false" aria-label="Lower third">
                       <span class="pos-icon pos-lower">
                         <span class="pos-line"></span>
                         <span class="pos-line"></span>
@@ -322,8 +408,8 @@
 
           <div class="inspector-group" id="ccli-group">
             <button class="section-toggle collapsed" id="ccli-toggle" type="button" aria-expanded="false">
-              <span>CCLI Metadata</span>
-              <span class="chevron" aria-hidden="true">&gt;</span>
+              <span>Licensing</span>
+              <span class="chevron" aria-hidden="true">v</span>
             </button>
             <div class="section-body" id="ccli-section" hidden>
               <div class="form-row">
@@ -368,6 +454,30 @@
         <div class="drop-sub">Creates a new song for each .txt or .pptx file (images follow selection)</div>
       </div>
     </div>
+
+    <dialog class="song-library-dialog" id="song-library-dialog" aria-labelledby="song-library-title">
+      <div class="song-library-shell">
+        <header class="song-library-header">
+          <div>
+            <span class="eyebrow">Reusable content</span>
+            <h2 id="song-library-title">Song Library</h2>
+          </div>
+          <button id="close-song-library" type="button" aria-label="Close song library">Close</button>
+        </header>
+        <label class="song-library-search" for="song-library-search">
+          <span>Search title, author, or CCLI number</span>
+          <input id="song-library-search" type="search" autocomplete="off" placeholder="Search songs" />
+        </label>
+        <ul class="song-library-results" id="song-library-results" aria-label="Library songs"></ul>
+        <div class="empty-hint" id="song-library-empty">No library songs match this search.</div>
+        <footer class="song-library-actions">
+          <button id="delete-library-song" class="danger-action" type="button" disabled>Delete</button>
+          <button id="add-library-song" class="primary" type="button" disabled>Add to Setlist</button>
+        </footer>
+      </div>
+    </dialog>
+
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-relevant="additions"></div>
 
     <script type="module" src="operator.js"></script>
   </body>

@@ -17,12 +17,13 @@ Offline Windows worship lyrics presenter.
 
 ## Build and Publish (maintainers)
 
-1. Ensure Node.js and npm are installed.
-2. Set `GITHUB_TOKEN` with repo access in your environment.
-3. Bump `version` in `package.json` (release tags should be `vX.Y.Z`).
-4. Run `npm run publish`.
-5. Find artifacts in `out-publish\make`.
-6. In GitHub Releases, publish the draft release so auto-updates work.
+1. Install Node.js 22.12 or newer.
+2. Run `npm ci` and `npm run check`.
+3. Set `GITHUB_TOKEN` with repo access in your environment.
+4. Bump `version` in `package.json` (release tags should be `vX.Y.Z`).
+5. Run `npm run publish`.
+6. Find artifacts in `out-publish\make`.
+7. In GitHub Releases, publish the draft release so auto-updates work.
 
 ## Release Checklist
 

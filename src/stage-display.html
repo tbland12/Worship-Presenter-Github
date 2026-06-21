@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'none'; media-src 'none'; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; frame-src 'none'" />
+    <title>Stage Display</title>
+    <link rel="stylesheet" href="stage-display.css" />
+  </head>
+  <body>
+    <main class="stage-layout" id="stage-layout" data-active="false" data-panic="false">
+      <header class="stage-header">
+        <div>
+          <div class="stage-kicker" id="stage-section">Stage display</div>
+          <div class="stage-title" id="stage-title">Waiting for live content</div>
+        </div>
+        <time class="stage-clock" id="stage-clock"></time>
+      </header>
+      <section class="current-card" aria-labelledby="current-label">
+        <div class="card-label" id="current-label">Current</div>
+        <div class="current-text" id="current-text">Nothing is live</div>
+      </section>
+      <section class="notes-card" aria-labelledby="notes-label">
+        <div class="card-label" id="notes-label">Speaker notes</div>
+        <div class="notes-text" id="notes-text">No notes for this slide</div>
+      </section>
+      <section class="next-card" aria-labelledby="next-label-heading">
+        <div class="card-label" id="next-label-heading">Up next <span id="next-label"></span></div>
+        <div class="next-text" id="next-text">End of section</div>
+      </section>
+      <div class="panic-banner" id="panic-banner" hidden>PROGRAM OUTPUT IS BLACK</div>
+    </main>
+    <script src="stage-display.js"></script>
+  </body>
+</html>

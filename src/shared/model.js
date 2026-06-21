@@ -43,8 +43,8 @@ const DEFAULT_THEME = {
 
 export function createNewProject() {
   return {
-    schemaVersion: 1,
-    appVersion: '0.1.0',
+    schemaVersion: 2,
+    appVersion: '0.1.5',
     settings: {
       aspectRatio: '16:9',
       textFadeMs: 200,
@@ -83,8 +83,9 @@ export function createSong(title = 'New Song') {
       type: 'image',
       path: ''
     },
-    theme: { ...DEFAULT_THEME },
-    slides: []
+    theme: getDefaultTheme(),
+    slides: [],
+    librarySource: null
   };
   return song;
 }
@@ -94,7 +95,8 @@ export function createSlide({
   titleText = '',
   lyricsText = '',
   footerText = '',
-  footerAutoCcli = true
+  footerAutoCcli = true,
+  speakerNotes = ''
 } = {}) {
   return {
     id: `slide-${crypto.randomUUID()}`,
@@ -106,7 +108,8 @@ export function createSlide({
     footerAutoCcli,
     titleText: richTextFromPlain(titleText),
     lyricsText: richTextFromPlain(lyricsText),
-    footerText: richTextFromPlain(footerText)
+    footerText: richTextFromPlain(footerText),
+    speakerNotes
   };
 }
 
@@ -114,14 +117,16 @@ export function createMediaSlide({
   label = 'Slide',
   mediaPath = '',
   mediaType = 'image',
-  hideDuringLoop = false
+  hideDuringLoop = false,
+  speakerNotes = ''
 } = {}) {
   return {
     id: `media-${crypto.randomUUID()}`,
     label,
     mediaPath,
     mediaType,
-    hideDuringLoop: Boolean(hideDuringLoop)
+    hideDuringLoop: Boolean(hideDuringLoop),
+    speakerNotes
   };
 }
 

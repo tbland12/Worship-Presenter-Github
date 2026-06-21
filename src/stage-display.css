@@ -1,0 +1,134 @@
+:root {
+  color-scheme: dark;
+  font-family: "Segoe UI", sans-serif;
+  background: #070b0f;
+  color: #f8fbff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  overflow: hidden;
+  background: radial-gradient(circle at 15% 0%, #142232, #070b0f 58%);
+}
+
+.stage-layout {
+  width: 100vw;
+  height: 100vh;
+  display: grid;
+  grid-template-columns: minmax(0, 1.65fr) minmax(300px, 0.85fr);
+  grid-template-rows: auto minmax(0, 1fr) minmax(180px, 0.42fr);
+  gap: clamp(14px, 1.8vw, 30px);
+  padding: clamp(20px, 2.5vw, 46px);
+}
+
+.stage-header {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 24px;
+  border-bottom: 1px solid #2b3d50;
+  padding-bottom: 16px;
+}
+
+.stage-kicker,
+.card-label {
+  color: #65d8ba;
+  font-size: clamp(14px, 1.3vw, 24px);
+  font-weight: 750;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.stage-title {
+  margin-top: 5px;
+  color: #b9c8d8;
+  font-size: clamp(18px, 1.8vw, 34px);
+}
+
+.stage-clock {
+  font-variant-numeric: tabular-nums;
+  font-size: clamp(34px, 4.2vw, 76px);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.current-card,
+.notes-card,
+.next-card {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid #2b3d50;
+  border-radius: 18px;
+  padding: clamp(18px, 2vw, 34px);
+  background: rgba(14, 23, 32, 0.92);
+  overflow: hidden;
+}
+
+.current-card {
+  grid-row: 2 / 4;
+  display: flex;
+  flex-direction: column;
+  border-color: #3d846f;
+  box-shadow: inset 0 3px 0 #65d8ba;
+}
+
+.current-text {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: clamp(34px, 4.3vw, 82px);
+  font-weight: 700;
+  line-height: 1.16;
+}
+
+.notes-card,
+.next-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.notes-text,
+.next-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  font-size: clamp(22px, 2.35vw, 44px);
+  line-height: 1.25;
+}
+
+.notes-text { color: #ffd27d; }
+.next-text { color: #d5e0eb; }
+#next-label { color: #8ea2b7; letter-spacing: 0; text-transform: none; }
+
+.panic-banner {
+  position: fixed;
+  inset: auto 0 0;
+  padding: 12px 24px;
+  background: #c84035;
+  color: white;
+  text-align: center;
+  font-size: clamp(18px, 1.6vw, 30px);
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.stage-layout[data-active="false"] .current-card,
+.stage-layout[data-active="false"] .notes-card,
+.stage-layout[data-active="false"] .next-card {
+  opacity: 0.62;
+}
+
+@media (max-aspect-ratio: 4/3) {
+  .stage-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1.3fr) minmax(150px, 0.55fr) minmax(150px, 0.55fr);
+  }
+  .current-card { grid-row: auto; }
+}

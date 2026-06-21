@@ -1,13 +1,7 @@
 module.exports = {
   outDir: 'out-publish',
   packagerConfig: {
-    asar: true,
-    extraResource: [
-      'library'
-    ],
-    ignore: [
-      /^\/library($|\/)/
-    ]
+    asar: true
   },
   makers: [
     {

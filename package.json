@@ -1,25 +1,36 @@
 {
   "name": "worship-presenter",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Offline Windows worship lyrics presenter",
   "author": "Tyler Bland",
   "main": "main.js",
   "type": "commonjs",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "electron .",
+    "lint": "eslint main.js preload*.js forge.config.js src test",
+    "test": "node --test",
+    "check": "npm run lint && npm test",
     "package": "electron-forge package",
     "make": "electron-forge make",
     "publish": "electron-forge publish"
   },
   "devDependencies": {
-    "@electron-forge/cli": "^7.5.0",
-    "@electron-forge/maker-squirrel": "^7.5.0",
-    "@electron-forge/maker-zip": "^7.5.0",
-    "@electron-forge/publisher-github": "^7.5.0",
-    "electron": "^30.0.0"
+    "@electron-forge/cli": "^7.11.2",
+    "@electron-forge/maker-squirrel": "^7.11.2",
+    "@electron-forge/maker-zip": "^7.11.2",
+    "@electron-forge/publisher-github": "^7.11.2",
+    "electron": "42.4.1",
+    "eslint": "^10.5.0",
+    "eslint-plugin-no-unsanitized": "^4.1.5"
   },
   "dependencies": {
     "electron-squirrel-startup": "^1.0.1",
-    "jszip": "^3.10.1"
+    "jszip": "^3.10.1",
+    "yauzl": "^3.4.0",
+    "yazl": "^3.3.1",
+    "zod": "^4.2.1"
   }
 }

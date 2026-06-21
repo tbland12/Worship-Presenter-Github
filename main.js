@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, screen, Menu, autoUpdater } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, screen, Menu, autoUpdater, session, protocol, net } = require('electron');
 if (require('electron-squirrel-startup')) {
   app.quit();
 }
@@ -6,7 +6,22 @@ const path = require('path');
 const fs = require('fs/promises');
 const fssync = require('fs');
 const crypto = require('crypto');
-const { pathToFileURL, fileURLToPath } = require('url');
+const { pathToFileURL } = require('url');
+const JSZip = require('jszip');
+const { describeAsset, readSession, writeSession } = require('./src/main/session-v3');
+const { createPersistenceStores } = require('./src/main/persistence-stores');
+const {
+  buildHistoryEntry,
+  publicHistoryEntries,
+  removeHistoryEntry,
+  upsertHistory
+} = require('./src/main/project-history');
+const { migrateProject } = require('./src/main/project-v2');
+const { createSongLibrary, SongLibraryConflictError } = require('./src/main/song-library');
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'worship-media', privileges: { secure: true, standard: true, stream: true, supportFetchAPI: true } }
+]);
 
 if (typeof BrowserWindow.prototype.isReadyToShow !== 'function') {
   BrowserWindow.prototype.isReadyToShow = function isReadyToShow() {
@@ -22,24 +37,100 @@ if (typeof BrowserWindow.prototype.isReadyToShow !== 'function') {
 
 let mainWindow;
 const programWindows = new Map();
+let stageWindow;
 let libraryWindow;
 let libraryWindowScope = 'background';
 let updateCheckInProgress = false;
 let updateCheckRequested = false;
 let libraryInitPromise = null;
 let programVisible = false;
+let stageVisible = false;
+let stageDisplayTarget = null;
+let latestStageState = null;
 let programDisplayTarget = 'all-external';
 let programDisplayPreference = null;
 let displayChangeTimer = null;
+let activeSessionPath = null;
+let sessionAssetPaths = new Map();
+let projectDirty = false;
+let allowMainWindowClose = false;
+let closePromptOpen = false;
+let sessionWriteQueue = Promise.resolve();
+let recoveryWriteQueue = Promise.resolve();
+let historyWriteQueue = Promise.resolve();
+let songLibraryWriteQueue = Promise.resolve();
+let preferenceWriteQueue = Promise.resolve();
+let _persistenceStores = null;
+let _songLibrary = null;
+let recentSessionEntries = [];
+const fileTokens = new Map();
+const FILE_TOKEN_TTL_MS = 5 * 60 * 1000;
+
+function issueFileToken(event, filePath) {
+  const extension = path.extname(filePath).toLowerCase();
+  if (!IMPORT_EXTENSIONS.has(extension)) throw new Error('Unsupported file type.');
+  const token = crypto.randomUUID();
+  fileTokens.set(token, { filePath, senderId: event.sender.id, expiresAt: Date.now() + FILE_TOKEN_TTL_MS });
+  return { token, name: path.basename(filePath), extension };
+}
+
+function assertOperatorSender(event) {
+  if (!mainWindow || mainWindow.isDestroyed() || event.sender.id !== mainWindow.webContents.id) {
+    throw new Error('IPC request is not authorized for this window.');
+  }
+}
+
+function assertLibrarySender(event) {
+  if (!libraryWindow || libraryWindow.isDestroyed() || event.sender.id !== libraryWindow.webContents.id) {
+    throw new Error('IPC request is not authorized for this window.');
+  }
+}
+
+function assertProgramSender(event) {
+  const authorized = [...programWindows.values()].some((window) => {
+    return window && !window.isDestroyed() && event.sender.id === window.webContents.id;
+  });
+  if (!authorized) throw new Error('IPC request is not authorized for this window.');
+}
+
+function assertStageSender(event) {
+  if (!stageWindow || stageWindow.isDestroyed() || event.sender.id !== stageWindow.webContents.id) {
+    throw new Error('IPC request is not authorized for this window.');
+  }
+}
+
+function assertOperatorOrProgramSender(event) {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender.id === mainWindow.webContents.id) return;
+  assertProgramSender(event);
+}
+
+function assertOperatorOrStageSender(event) {
+  if (mainWindow && !mainWindow.isDestroyed() && event.sender.id === mainWindow.webContents.id) return;
+  assertStageSender(event);
+}
+
+function consumeFileToken(event, token, allowedExtensions) {
+  const record = fileTokens.get(token);
+  fileTokens.delete(token);
+  if (!record || record.senderId !== event.sender.id || record.expiresAt < Date.now()) {
+    throw new Error('File selection expired or is invalid.');
+  }
+  const extension = path.extname(record.filePath).toLowerCase();
+  if (allowedExtensions && !allowedExtensions.has(extension)) throw new Error('Unsupported file type.');
+  return record.filePath;
+}
 
 const UPDATE_REPOSITORY = 'tbland12/Worship-Presenter-Github';
 
 const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp']);
 const VIDEO_EXTS = new Set(['.mp4', '.mov', '.mkv', '.avi', '.webm']);
-const SESSION_VERSION = 2;
+const IMPORT_EXTENSIONS = new Set([...IMAGE_EXTS, ...VIDEO_EXTS, '.txt', '.pptx']);
 const LIBRARY_SEED_FILE = '.seeded';
 const DISPLAY_TARGET_ALL_EXTERNAL = 'all-external';
 const TIMER_LIBRARY_FOLDER = 'Timers';
+const MAX_PPTX_BYTES = 100 * 1024 * 1024;
+const MAX_PPTX_SLIDES = 512;
+const MAX_PPTX_XML_BYTES = 256 * 1024 * 1024;
 
 programDisplayPreference = { mode: DISPLAY_TARGET_ALL_EXTERNAL };
 
@@ -189,21 +280,6 @@ function logError(message, error) {
   console.error(message, error);
 }
 
-function buildTimestamp() {
-  const now = new Date();
-  const pad = (value) => String(value).padStart(2, '0');
-  return `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-}
-
-async function createDefaultProjectFolder() {
-  const baseDir = path.join(app.getPath('documents'), 'WorshipPresenter Projects');
-  await fs.mkdir(baseDir, { recursive: true });
-  const folderName = `Untitled-${buildTimestamp()}`;
-  const projectDir = path.join(baseDir, folderName);
-  await fs.mkdir(projectDir, { recursive: true });
-  return projectDir;
-}
-
 function getDialogParent() {
   const focused = BrowserWindow.getFocusedWindow();
   if (focused && !focused.isDestroyed()) {
@@ -227,7 +303,22 @@ async function showOpenDialogSafe(options) {
   return await dialog.showOpenDialog(options);
 }
 
+function hardenWindow(window) {
+  if (!window || window.isDestroyed()) {
+    return;
+  }
+  window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+  window.webContents.on('will-navigate', (event) => {
+    event.preventDefault();
+  });
+  window.webContents.on('will-attach-webview', (event) => {
+    event.preventDefault();
+  });
+}
+
 function createMainWindow() {
+  allowMainWindowClose = false;
+  closePromptOpen = false;
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -237,12 +328,46 @@ function createMainWindow() {
     webPreferences: {
       autoplayPolicy: 'no-user-gesture-required',
       contextIsolation: true,
-      nodeIntegration: true,
+      nodeIntegration: false,
+      sandbox: true,
       preload: path.join(__dirname, 'preload.js')
     }
   });
 
+  hardenWindow(mainWindow);
   mainWindow.loadFile(path.join(__dirname, 'src', 'operator.html'));
+  mainWindow.on('close', async (event) => {
+    if (allowMainWindowClose || !projectDirty) return;
+    if (closePromptOpen) {
+      event.preventDefault();
+      return;
+    }
+    event.preventDefault();
+    closePromptOpen = true;
+    let awaitingSave = false;
+    try {
+      const result = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        title: 'Unsaved Changes',
+        message: 'Save changes before closing Worship Presenter?',
+        detail: 'Unsaved changes will be lost if you discard them.',
+        buttons: ['Save', 'Discard', 'Cancel'],
+        defaultId: 0,
+        cancelId: 2,
+        noLink: true
+      });
+      if (result.response === 0) {
+        awaitingSave = true;
+        mainWindow.webContents.send('project:save-before-close');
+      } else if (result.response === 1) {
+        await clearRecoverySnapshot().catch((error) => logError('Failed to clear discarded recovery snapshot', error));
+        allowMainWindowClose = true;
+        mainWindow.close();
+      }
+    } finally {
+      if (!awaitingSave) closePromptOpen = false;
+    }
+  });
   mainWindow.on('closed', () => {
     programWindows.forEach((window) => {
       if (window && !window.isDestroyed()) {
@@ -264,6 +389,16 @@ function sendMenuAction(action) {
   }
 }
 
+function recentProjectMenuItems() {
+  if (recentSessionEntries.length === 0) {
+    return [{ label: 'No Recent Projects', enabled: false }];
+  }
+  return recentSessionEntries.slice(0, 10).map((entry) => ({
+    label: entry.title,
+    click: () => sendMenuAction(`open-recent:${entry.id}`)
+  }));
+}
+
 function createAppMenu() {
   const template = [
     {
@@ -278,6 +413,10 @@ function createAppMenu() {
           label: 'Open Project',
           accelerator: 'CmdOrCtrl+O',
           click: () => sendMenuAction('open-project')
+        },
+        {
+          label: 'Open Recent',
+          submenu: recentProjectMenuItems()
         },
         {
           label: 'Save',
@@ -488,12 +627,14 @@ function createProgramWindow(displayId) {
       autoplayPolicy: 'no-user-gesture-required',
       backgroundThrottling: false,
       contextIsolation: true,
-      nodeIntegration: true,
-      preload: path.join(__dirname, 'preload.js')
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'preload-program.js')
     }
   });
 
   programWindows.set(displayId, window);
+  hardenWindow(window);
   window.loadFile(path.join(__dirname, 'src', 'program.html'));
   window.once('ready-to-show', () => {
     positionProgramWindow(window, displayId);
@@ -577,6 +718,99 @@ function hideProgramWindows() {
   }
 }
 
+function resolveStageDisplayId(target, displays = screen.getAllDisplays()) {
+  if (displays.length === 0) return null;
+  const requested = target == null ? null : String(target);
+  const exact = requested && displays.find((display) => String(display.id) === requested);
+  if (exact) return exact.id;
+  const operatorDisplay = getOperatorDisplay();
+  const external = displays.find((display) => !operatorDisplay || display.id !== operatorDisplay.id);
+  return (external || operatorDisplay || displays[0]).id;
+}
+
+function positionStageWindow(window, displayId) {
+  if (!window || window.isDestroyed() || displayId == null) return;
+  const display = getDisplayById(displayId);
+  if (!boundsEqual(window.getBounds(), display.bounds)) window.setBounds(display.bounds);
+  if (!window.isFullScreen()) window.setFullScreen(true);
+  if (!window.isAlwaysOnTop()) window.setAlwaysOnTop(true, 'screen-saver');
+}
+
+function createStageWindow(displayId) {
+  if (stageWindow && !stageWindow.isDestroyed()) {
+    positionStageWindow(stageWindow, displayId);
+    return stageWindow;
+  }
+  stageWindow = new BrowserWindow({
+    show: false,
+    frame: false,
+    backgroundColor: '#080d12',
+    webPreferences: {
+      backgroundThrottling: false,
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'preload-stage.js')
+    }
+  });
+  hardenWindow(stageWindow);
+  stageWindow.loadFile(path.join(__dirname, 'src', 'stage-display.html'));
+  stageWindow.once('ready-to-show', () => {
+    positionStageWindow(stageWindow, displayId);
+    if (latestStageState) stageWindow.webContents.send('stage:state', latestStageState);
+    if (stageVisible) stageWindow.showInactive();
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.focus();
+  });
+  stageWindow.on('closed', () => {
+    stageWindow = null;
+    if (stageVisible) {
+      stageVisible = false;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('stage:event', { type: 'stage-hidden' });
+      }
+    }
+  });
+  return stageWindow;
+}
+
+function showStageWindow(target) {
+  const displays = screen.getAllDisplays();
+  const displayId = resolveStageDisplayId(target ?? stageDisplayTarget, displays);
+  if (displayId == null) return;
+  stageVisible = true;
+  stageDisplayTarget = String(displayId);
+  const window = createStageWindow(displayId);
+  positionStageWindow(window, displayId);
+  if (window.isReadyToShow()) window.showInactive();
+  if (latestStageState && !window.webContents.isLoading()) {
+    window.webContents.send('stage:state', latestStageState);
+  }
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.focus();
+}
+
+function hideStageWindow() {
+  stageVisible = false;
+  if (stageWindow && !stageWindow.isDestroyed()) stageWindow.hide();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('stage:event', { type: 'stage-hidden' });
+  }
+}
+
+function sanitizeStageState(value = {}) {
+  const text = (input, max = 50000) => String(input || '').slice(0, max);
+  return {
+    active: value.active === true,
+    panic: value.panic === true,
+    section: text(value.section, 64),
+    itemTitle: text(value.itemTitle, 1000),
+    currentLabel: text(value.currentLabel, 1000),
+    currentText: text(value.currentText),
+    currentNotes: text(value.currentNotes, 20000),
+    nextLabel: text(value.nextLabel, 1000),
+    nextText: text(value.nextText)
+  };
+}
+
 function handleDisplayChange() {
   displayChangeTimer = null;
   const displays = screen.getAllDisplays();
@@ -588,11 +822,29 @@ function handleDisplayChange() {
   } else {
     closeMissingProgramWindows(displayIds);
   }
+  if (stageVisible) {
+    const previousStageTarget = stageDisplayTarget;
+    const stageDisplayId = resolveStageDisplayId(stageDisplayTarget, displays);
+    if (stageDisplayId != null) {
+      stageDisplayTarget = String(stageDisplayId);
+      positionStageWindow(stageWindow, stageDisplayId);
+      if (stageDisplayTarget !== previousStageTarget) {
+        persistStageDisplayTarget(stageDisplayTarget).catch((error) => {
+          logError('Failed to save fallback stage display target', error);
+        });
+      }
+    }
+  }
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('display:changed', {
       target: programDisplayTarget,
       resolvedTarget: resolved.target,
       resolvedDisplayIds: resolved.ids
+    });
+    mainWindow.webContents.send('stage:event', {
+      type: 'stage-display-changed',
+      displayTarget: stageDisplayTarget,
+      visible: stageVisible
     });
   }
 }
@@ -764,6 +1016,7 @@ async function walkLibraryFolder(root, dir, items, options = {}) {
       await walkLibraryFolder(root, fullPath, items, options);
       continue;
     }
+    if (!entry.isFile()) continue;
     const ext = path.extname(entry.name).toLowerCase();
     if (!IMAGE_EXTS.has(ext) && !VIDEO_EXTS.has(ext)) {
       continue;
@@ -782,9 +1035,12 @@ async function walkLibraryFolder(root, dir, items, options = {}) {
     items.push({
       name: entry.name,
       relativePath: path.relative(root, fullPath),
-      absolutePath: fullPath,
       type,
-      fileUrl: pathToFileURL(fullPath).toString(),
+      fileUrl: `worship-media://library/${path.relative(options.mediaRoot || root, fullPath)
+        .replace(/\\/g, '/')
+        .split('/')
+        .map(encodeURIComponent)
+        .join('/')}`,
       size
     });
   }
@@ -795,6 +1051,7 @@ async function listLibraryItems(options = {}) {
   const baseFolder = await ensureLibraryFolder();
   let root = baseFolder;
   const walkOptions = {};
+  walkOptions.mediaRoot = baseFolder;
   if (scope === 'announcements') {
     root = path.join(baseFolder, 'Announcements');
     await fs.mkdir(root, { recursive: true });
@@ -808,7 +1065,7 @@ async function listLibraryItems(options = {}) {
   const items = [];
   await walkLibraryFolder(root, root, items, walkOptions);
   items.sort((a, b) => a.name.localeCompare(b.name));
-  return { folder: root, items };
+  return { folder: 'Media Library', items };
 }
 
 function createLibraryWindow(scope = 'background') {
@@ -829,10 +1086,12 @@ function createLibraryWindow(scope = 'background') {
     backgroundColor: '#101418',
     webPreferences: {
       contextIsolation: true,
-      nodeIntegration: true,
-      preload: path.join(__dirname, 'preload.js')
+      nodeIntegration: false,
+      sandbox: true,
+      preload: path.join(__dirname, 'preload-library.js')
     }
   });
+  hardenWindow(libraryWindow);
   libraryWindow.loadFile(path.join(__dirname, 'src', 'library.html'), {
     query: { scope: libraryWindowScope }
   });
@@ -843,14 +1102,6 @@ function createLibraryWindow(scope = 'background') {
 
 async function ensureDir(folderPath) {
   await fs.mkdir(folderPath, { recursive: true });
-}
-
-async function saveProject(folderPath, project) {
-  await ensureDir(folderPath);
-  await ensureDir(path.join(folderPath, 'media'));
-  await ensureDir(path.join(folderPath, 'thumbnails'));
-  const projectPath = path.join(folderPath, 'project.json');
-  await fs.writeFile(projectPath, JSON.stringify(project, null, 2), 'utf8');
 }
 
 function uniqueFileName(targetDir, baseName, ext) {
@@ -901,9 +1152,7 @@ function buildAnnouncementRelativePath(baseName, ext) {
 }
 
 function normalizeLibraryRelativePath(relativePath) {
-  if (!relativePath) {
-    return '';
-  }
+  if (!relativePath) return '';
   const cleaned = relativePath.replace(/^library[\\/]/, '');
   return `library/${cleaned.replace(/\\/g, '/')}`;
 }
@@ -1119,10 +1368,25 @@ async function importContentPack(sourcePath) {
   return { error: 'Select a folder content pack to import.' };
 }
 
-function ensureUniqueRelativePath(relativePath, used) {
-  if (!relativePath) {
-    return '';
+async function resolveContainedFile(root, relativePath) {
+  const cleaned = sanitizeRelativePath(relativePath);
+  if (!cleaned) return null;
+  try {
+    const [realRoot, realCandidate] = await Promise.all([
+      fs.realpath(root),
+      fs.realpath(path.join(root, cleaned))
+    ]);
+    const relative = path.relative(realRoot, realCandidate);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return null;
+    const stat = await fs.stat(realCandidate);
+    return stat.isFile() ? realCandidate : null;
+  } catch (error) {
+    return null;
   }
+}
+
+function ensureUniqueRelativePath(relativePath, used) {
+  if (!relativePath) return '';
   let candidate = relativePath.replace(/\\/g, '/');
   if (!used.has(candidate)) {
     used.add(candidate);
@@ -1132,46 +1396,63 @@ function ensureUniqueRelativePath(relativePath, used) {
   const ext = path.posix.extname(candidate);
   const base = path.posix.basename(candidate, ext);
   let counter = 1;
-  while (true) {
+  while (used.has(candidate)) {
     const name = `${base}_${counter}${ext}`;
-    const next = dir === '.' ? name : path.posix.join(dir, name);
-    if (!used.has(next)) {
-      used.add(next);
-      return next;
-    }
+    candidate = dir === '.' ? name : path.posix.join(dir, name);
     counter += 1;
   }
+  used.add(candidate);
+  return candidate;
 }
 
-function resolveAssetPath(assetPath, options = {}) {
+async function resolveAssetPath(assetPath) {
   if (!assetPath || typeof assetPath !== 'string') {
     return null;
   }
   if (assetPath.startsWith('library/') || assetPath.startsWith('library\\')) {
-    const cleaned = assetPath.replace(/^library[\\/]/, '');
-    const libraryPath = path.join(getLibraryFolder(), cleaned);
-    if (fssync.existsSync(libraryPath)) {
-      return libraryPath;
-    }
-    return path.join(getBundledLibraryFolder(), cleaned);
+    const cleaned = sanitizeRelativePath(assetPath.replace(/^library[\\/]/, ''));
+    if (!cleaned) return null;
+    return await resolveContainedFile(getLibraryFolder(), cleaned)
+      || resolveContainedFile(getBundledLibraryFolder(), cleaned);
   }
-  if (assetPath.startsWith('media/') || assetPath.startsWith('media\\')) {
-    if (!options.projectFolder) {
-      return null;
-    }
-    return path.join(options.projectFolder, assetPath);
-  }
-  if (assetPath.startsWith('file://')) {
-    try {
-      return fileURLToPath(assetPath);
-    } catch (error) {
-      return null;
-    }
-  }
-  if (/^[a-zA-Z]:[\\/]/.test(assetPath)) {
-    return assetPath;
+  if (assetPath.startsWith('session/')) {
+    return sessionAssetPaths.get(assetPath.slice('session/'.length)) || null;
   }
   return null;
+}
+
+async function collectV3Session(project) {
+  const projectCopy = project ? JSON.parse(JSON.stringify(project)) : {};
+  const assets = [];
+  const bySource = new Map();
+  const addAsset = async (assetPath, mediaType) => {
+    if (!assetPath) return null;
+    const resolvedPath = await resolveAssetPath(assetPath);
+    if (!resolvedPath) return null;
+    const sourceKey = path.resolve(resolvedPath).toLowerCase();
+    if (bySource.has(sourceKey)) return bySource.get(sourceKey).id;
+    const descriptor = await describeAsset(resolvedPath, mediaType);
+    const asset = { ...descriptor, sourcePath: resolvedPath };
+    assets.push(asset);
+    bySource.set(sourceKey, asset);
+    return descriptor.id;
+  };
+  for (const song of Object.values(projectCopy.songs || {})) {
+    if (!song?.background?.path) continue;
+    const id = await addAsset(song.background.path, song.background.type);
+    if (id) song.background.path = `session/${id}`;
+  }
+  for (const slide of projectCopy.announcements?.slides || []) {
+    if (!slide?.mediaPath) continue;
+    const id = await addAsset(slide.mediaPath, 'image');
+    if (id) slide.mediaPath = `session/${id}`;
+  }
+  for (const slide of projectCopy.timer?.slides || []) {
+    if (!slide?.mediaPath) continue;
+    const id = await addAsset(slide.mediaPath, slide.mediaType);
+    if (id) slide.mediaPath = `session/${id}`;
+  }
+  return { project: projectCopy, assets };
 }
 
 async function statIfExists(filePath) {
@@ -1182,7 +1463,7 @@ async function statIfExists(filePath) {
   }
 }
 
-async function collectSessionAssets(project, options = {}) {
+async function _collectLegacySessionAssets(project, options = {}) {
   const projectCopy = project ? JSON.parse(JSON.stringify(project)) : {};
   const assets = [];
   const usedRelativePaths = new Set();
@@ -1195,7 +1476,7 @@ async function collectSessionAssets(project, options = {}) {
     if (pathMap.has(sourceKey)) {
       return pathMap.get(sourceKey);
     }
-    const resolvedPath = resolveAssetPath(sourcePath, options);
+    const resolvedPath = await resolveAssetPath(sourcePath, options);
     if (!resolvedPath) {
       return null;
     }
@@ -1267,7 +1548,7 @@ async function collectSessionAssets(project, options = {}) {
   return { project: projectCopy, assets };
 }
 
-async function restoreSessionAssets(project, assets) {
+async function _restoreLegacySessionAssets(project, assets) {
   if (!Array.isArray(assets) || assets.length === 0) {
     return { project, restored: 0 };
   }
@@ -1404,68 +1685,132 @@ async function restoreSessionAssets(project, assets) {
   return { project, restored };
 }
 
-ipcMain.handle('library:roots', async () => {
-  await ensureLibraryFolder();
-  return {
-    libraryRoot: getLibraryFolder(),
-    bundledLibraryRoot: getBundledLibraryFolder()
-  };
-});
-ipcMain.handle('app:get-version', () => app.getVersion());
+function enqueueRecoveryOperation(operation) {
+  const result = recoveryWriteQueue.then(operation, operation);
+  recoveryWriteQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
 
-ipcMain.handle('project:new', async (_event, options = {}) => {
+function enqueueHistoryOperation(operation) {
+  const result = historyWriteQueue.then(operation, operation);
+  historyWriteQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function enqueueSongLibraryOperation(operation) {
+  const result = songLibraryWriteQueue.then(operation, operation);
+  songLibraryWriteQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+function enqueuePreferenceOperation(operation) {
+  const result = preferenceWriteQueue.then(operation, operation);
+  preferenceWriteQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
+async function persistStageDisplayTarget(target) {
+  if (!_persistenceStores) return;
+  await enqueuePreferenceOperation(() => _persistenceStores.preferences.update((preferences) => ({
+    ...preferences,
+    stageDisplayTarget: target
+  })));
+}
+
+async function clearRecoverySnapshot() {
+  if (!_persistenceStores) return;
+  await enqueueRecoveryOperation(() => _persistenceStores.recovery.replace(null));
+}
+
+async function refreshRecentSessions({ rebuildMenu = true } = {}) {
+  if (!_persistenceStores) return;
+  const history = await enqueueHistoryOperation(() => _persistenceStores.history.read());
+  recentSessionEntries = history.entries;
+  if (rebuildMenu && app.isReady()) createAppMenu();
+}
+
+async function recordRecentSession(filePath, project) {
+  if (!_persistenceStores) return;
   try {
-    const mode = options.mode || 'prompt';
-    if (mode === 'auto') {
-      return await createDefaultProjectFolder();
-    }
-
-    const result = await showOpenDialogSafe({
-      title: options.title || 'Create or Select Project Folder',
-      properties: ['openDirectory', 'createDirectory']
+    const entry = buildHistoryEntry(filePath, project);
+    const history = await enqueueHistoryOperation(() => {
+      return _persistenceStores.history.update((current) => upsertHistory(current, entry));
     });
-    if (result.canceled || result.filePaths.length === 0) {
-      return null;
+    if (stageWindow && !stageWindow.isDestroyed()) {
+      stageWindow.close();
     }
-    return result.filePaths[0];
+    recentSessionEntries = history.entries;
+    if (app.isReady()) createAppMenu();
   } catch (error) {
-    logError('Failed to resolve project folder', error);
-    dialog.showErrorBox('Project Folder Error', String(error?.message || error));
-    return null;
+    logError('Failed to update recent projects', error);
   }
-});
+}
 
-ipcMain.handle('project:open', async () => {
+async function forgetRecentSession(id) {
+  if (!_persistenceStores) return;
   try {
-    const result = await showOpenDialogSafe({
-      title: 'Open Project Folder',
-      properties: ['openDirectory']
+    const history = await enqueueHistoryOperation(() => {
+      return _persistenceStores.history.update((current) => removeHistoryEntry(current, id));
     });
-    if (result.canceled || result.filePaths.length === 0) {
-      return null;
-    }
-    return result.filePaths[0];
+    recentSessionEntries = history.entries;
+    if (app.isReady()) createAppMenu();
   } catch (error) {
-    logError('Failed to open project folder dialog', error);
-    dialog.showErrorBox('Project Folder Error', String(error?.message || error));
-    return null;
+    logError('Failed to remove recent project', error);
   }
+}
+
+async function readSessionFromPath(filePath) {
+  const cacheKey = crypto.createHash('sha256').update(filePath).digest('hex').slice(0, 24);
+  const cacheDir = path.join(app.getPath('userData'), 'session-cache', cacheKey);
+  const opened = await readSession({ filePath, cacheDir });
+  activeSessionPath = filePath;
+  sessionAssetPaths = opened.assetPaths;
+  projectDirty = false;
+  return { filePath, project: opened.project };
+}
+
+async function prepareSongForLibrary(song) {
+  const prepared = structuredClone(song);
+  const backgroundPath = prepared?.background?.path || '';
+  if (!backgroundPath) return prepared;
+  if (backgroundPath.startsWith('library/') || backgroundPath.startsWith('library\\')) {
+    if (!await resolveAssetPath(backgroundPath)) {
+      throw new Error('Song background is unavailable and cannot be added to the library.');
+    }
+    return prepared;
+  }
+  if (!backgroundPath.startsWith('session/')) {
+    throw new Error('Song background must come from the media library or current session.');
+  }
+  const sourcePath = await resolveAssetPath(backgroundPath);
+  if (!sourcePath) throw new Error('Song background is unavailable and cannot be added to the library.');
+  const descriptor = await describeAsset(sourcePath, prepared.background.type);
+  const folder = prepared.background.type === 'video' ? 'Videos' : 'Images';
+  const relativePath = path.posix.join(folder, 'Song Library', `${descriptor.id}${descriptor.extension}`);
+  const targetPath = path.join(getLibraryFolder(), ...relativePath.split('/'));
+  await fs.mkdir(path.dirname(targetPath), { recursive: true });
+  if (!await statIfExists(targetPath)) await fs.copyFile(sourcePath, targetPath);
+  prepared.background.path = `library/${relativePath}`;
+  return prepared;
+}
+
+ipcMain.handle('app:get-version', (event) => {
+  assertOperatorSender(event);
+  return app.getVersion();
+});
+ipcMain.handle('file:register-drop', async (event, filePath) => {
+  assertOperatorSender(event);
+  if (!filePath || typeof filePath !== 'string') throw new Error('Dropped file path is invalid.');
+  const stat = await fs.stat(filePath);
+  if (!stat.isFile()) throw new Error('Dropped item is not a regular file.');
+  return issueFileToken(event, filePath);
 });
 
-ipcMain.handle('project:load', async (_event, folderPath) => {
-  const projectPath = path.join(folderPath, 'project.json');
-  const raw = await fs.readFile(projectPath, 'utf8');
-  return JSON.parse(raw);
-});
-
-ipcMain.handle('project:save', async (_event, folderPath, project) => {
-  await saveProject(folderPath, project);
-  return true;
-});
-
-ipcMain.handle('project:save-file', async (_event, filePath, project, options = {}) => {
-  try {
-    let targetPath = filePath;
+ipcMain.handle('project:save-file', async (event, project) => {
+  assertOperatorSender(event);
+  const saveOperation = async () => {
+    try {
+    let targetPath = activeSessionPath;
     if (!targetPath) {
       const result = await dialog.showSaveDialog(getDialogParent() || undefined, {
         title: 'Save Session',
@@ -1477,23 +1822,118 @@ ipcMain.handle('project:save-file', async (_event, filePath, project, options = 
       }
       targetPath = result.filePath;
     }
-    const { project: projectCopy, assets } = await collectSessionAssets(project, options);
-    const payload = {
-      sessionVersion: SESSION_VERSION,
-      project: projectCopy,
-      assets
-    };
-    await fs.writeFile(targetPath, JSON.stringify(payload, null, 2), 'utf8');
+    const prepared = await collectV3Session(project);
+    await writeSession({
+      targetPath,
+      appVersion: app.getVersion(),
+      project: prepared.project,
+      assets: prepared.assets
+    });
+    activeSessionPath = targetPath;
+    await recordRecentSession(targetPath, prepared.project);
+    await clearRecoverySnapshot().catch((error) => logError('Failed to clear recovery snapshot after save', error));
     return targetPath;
-  } catch (error) {
-    logError('Failed to save session file', error);
-    dialog.showErrorBox('Save Error', String(error?.message || error));
-    return null;
-  }
+    } catch (error) {
+      logError('Failed to save session file', error);
+      dialog.showErrorBox('Save Error', String(error?.message || error));
+      return null;
+    }
+  };
+  const result = sessionWriteQueue.then(saveOperation, saveOperation);
+  sessionWriteQueue = result.then(() => undefined, () => undefined);
+  return result;
 });
 
-ipcMain.handle('project:open-file', async () => {
+ipcMain.handle('project:confirm-transition', async (event) => {
+  assertOperatorSender(event);
+  if (!projectDirty) return 'discard';
+  const result = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: 'Unsaved Changes',
+    message: 'Save changes before continuing?',
+    detail: 'Unsaved changes will be lost if you discard them.',
+    buttons: ['Save', 'Discard', 'Cancel'],
+    defaultId: 0,
+    cancelId: 2,
+    noLink: true
+  });
+  return ['save', 'discard', 'cancel'][result.response] || 'cancel';
+});
+
+ipcMain.on('project:set-dirty', (event, dirty) => {
+  assertOperatorSender(event);
+  projectDirty = dirty === true;
+});
+
+ipcMain.handle('project:write-recovery', async (event, project) => {
+  assertOperatorSender(event);
+  if (!_persistenceStores) return false;
+  const migratedProject = migrateProject(project);
+  await enqueueRecoveryOperation(() => _persistenceStores.recovery.replace({
+    version: 1,
+    updatedAt: new Date().toISOString(),
+    sourceSessionPath: activeSessionPath,
+    project: migratedProject
+  }));
+  return true;
+});
+
+ipcMain.handle('project:clear-recovery', async (event) => {
+  assertOperatorSender(event);
+  await clearRecoverySnapshot();
+  return true;
+});
+
+ipcMain.handle('project:check-recovery', async (event) => {
+  assertOperatorSender(event);
+  if (!_persistenceStores) return null;
+  const recovery = await enqueueRecoveryOperation(() => _persistenceStores.recovery.read());
+  if (!recovery) return null;
+  const sourceName = recovery.sourceSessionPath ? path.basename(recovery.sourceSessionPath) : 'an unsaved session';
+  const result = await dialog.showMessageBox(getDialogParent() || undefined, {
+    type: 'question',
+    title: 'Recover Unsaved Session',
+    message: 'Worship Presenter found unsaved work.',
+    detail: `Recover changes from ${sourceName}?`,
+    buttons: ['Recover', 'Discard'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true
+  });
+  if (result.response === 1) {
+    await clearRecoverySnapshot();
+    return null;
+  }
+
+  let filePath = null;
+  activeSessionPath = null;
+  sessionAssetPaths = new Map();
+  if (recovery.sourceSessionPath) {
+    try {
+      const source = await readSessionFromPath(recovery.sourceSessionPath);
+      filePath = source.filePath;
+    } catch (error) {
+      logError('Failed to reopen the recovery source session', error);
+      activeSessionPath = null;
+      sessionAssetPaths = new Map();
+    }
+  }
+  projectDirty = true;
+  return { filePath, project: recovery.project, recoveredAt: recovery.updatedAt };
+});
+
+ipcMain.on('project:complete-close', (event, saved) => {
+  assertOperatorSender(event);
+  closePromptOpen = false;
+  if (!saved || !mainWindow || mainWindow.isDestroyed()) return;
+  projectDirty = false;
+  allowMainWindowClose = true;
+  mainWindow.close();
+});
+
+ipcMain.handle('project:open-file', async (event) => {
   try {
+    assertOperatorSender(event);
     const result = await showOpenDialogSafe({
       title: 'Open Session',
       properties: ['openFile'],
@@ -1502,13 +1942,10 @@ ipcMain.handle('project:open-file', async () => {
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
-    const filePath = result.filePaths[0];
-    const raw = await fs.readFile(filePath, 'utf8');
-    const parsed = JSON.parse(raw);
-    const project = parsed && parsed.project ? parsed.project : parsed;
-    const assets = parsed && parsed.assets ? parsed.assets : [];
-    const restored = await restoreSessionAssets(project, assets);
-    return { filePath, project: restored.project || project };
+    const payload = await readSessionFromPath(result.filePaths[0]);
+    await recordRecentSession(payload.filePath, payload.project);
+    await clearRecoverySnapshot().catch((error) => logError('Failed to clear recovery snapshot after open', error));
+    return payload;
   } catch (error) {
     logError('Failed to open session file', error);
     dialog.showErrorBox('Open Error', String(error?.message || error));
@@ -1517,11 +1954,11 @@ ipcMain.handle('project:open-file', async () => {
 });
 
 ipcMain.handle('assets:check', async (_event, payload = {}) => {
+  assertOperatorSender(_event);
   const paths = Array.isArray(payload.paths) ? payload.paths : [];
-  const projectFolder = payload.projectFolder || null;
   const missing = [];
   for (const assetPath of paths) {
-    const resolved = resolveAssetPath(assetPath, { projectFolder });
+    const resolved = await resolveAssetPath(assetPath);
     if (!resolved) {
       missing.push(assetPath);
       continue;
@@ -1534,8 +1971,9 @@ ipcMain.handle('assets:check', async (_event, payload = {}) => {
   return { missing };
 });
 
-ipcMain.handle('lyrics:pick', async () => {
+ipcMain.handle('lyrics:pick', async (event) => {
   try {
+    assertOperatorSender(event);
     const result = await showOpenDialogSafe({
       title: 'Import Lyrics',
       properties: ['openFile'],
@@ -1544,7 +1982,7 @@ ipcMain.handle('lyrics:pick', async () => {
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
-    return result.filePaths[0];
+    return issueFileToken(event, result.filePaths[0]);
   } catch (error) {
     logError('Failed to open lyrics picker', error);
     dialog.showErrorBox('Lyrics Picker Error', String(error?.message || error));
@@ -1552,8 +1990,10 @@ ipcMain.handle('lyrics:pick', async () => {
   }
 });
 
-ipcMain.handle('file:read-text', async (_event, filePath) => {
+ipcMain.handle('file:read-text', async (event, token) => {
   try {
+    assertOperatorSender(event);
+    const filePath = consumeFileToken(event, token, new Set(['.txt']));
     return await fs.readFile(filePath, 'utf8');
   } catch (error) {
     logError('Failed to read text file', error);
@@ -1562,8 +2002,165 @@ ipcMain.handle('file:read-text', async (_event, filePath) => {
   }
 });
 
-ipcMain.handle('media:pick', async () => {
+ipcMain.handle('project:list-recent', async (event) => {
+  assertOperatorSender(event);
+  return publicHistoryEntries({ version: 1, entries: recentSessionEntries });
+});
+
+ipcMain.handle('project:open-recent', async (event, id) => {
   try {
+    assertOperatorSender(event);
+    if (typeof id !== 'string' || !/^[a-f0-9]{32}$/.test(id)) throw new Error('Recent project ID is invalid.');
+    const entry = recentSessionEntries.find((item) => item.id === id);
+    if (!entry) throw new Error('Recent project is no longer available.');
+    const payload = await readSessionFromPath(entry.filePath);
+    await recordRecentSession(payload.filePath, payload.project);
+    await clearRecoverySnapshot().catch((error) => logError('Failed to clear recovery snapshot after open', error));
+    return payload;
+  } catch (error) {
+    if (typeof id === 'string') await forgetRecentSession(id);
+    logError('Failed to open recent session file', error);
+    dialog.showErrorBox('Open Error', String(error?.message || error));
+    return null;
+  }
+});
+
+ipcMain.handle('song-library:list', async (event, query) => {
+  assertOperatorSender(event);
+  if (!_songLibrary) return [];
+  return enqueueSongLibraryOperation(() => _songLibrary.list(query));
+});
+
+ipcMain.handle('song-library:save', async (event, payload = {}) => {
+  let preparedSong = null;
+  try {
+    assertOperatorSender(event);
+    if (!_songLibrary) throw new Error('Song library is unavailable.');
+    preparedSong = await prepareSongForLibrary(payload.song);
+    const result = await enqueueSongLibraryOperation(() => {
+      return _songLibrary.save(preparedSong, { force: payload.force === true });
+    });
+    return { ok: true, ...result };
+  } catch (error) {
+    if (error instanceof SongLibraryConflictError) {
+      const result = await dialog.showMessageBox(getDialogParent() || undefined, {
+        type: 'warning',
+        title: 'Library Song Changed',
+        message: 'This song has a newer revision in the library.',
+        detail: 'Replace the newer library revision with the version in this project?',
+        buttons: ['Replace Library Version', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true
+      });
+      if (result.response !== 0) {
+        return { ok: false, conflict: true, currentRevision: error.currentRevision };
+      }
+      try {
+        const forced = await enqueueSongLibraryOperation(() => _songLibrary.save(preparedSong, { force: true }));
+        return { ok: true, ...forced };
+      } catch (forceError) {
+        logError('Failed to replace song library revision', forceError);
+        return { ok: false, error: String(forceError?.message || forceError) };
+      }
+    }
+    logError('Failed to save song to library', error);
+    return { ok: false, error: String(error?.message || error) };
+  }
+});
+
+ipcMain.handle('song-library:instantiate', async (event, id) => {
+  assertOperatorSender(event);
+  if (!_songLibrary) throw new Error('Song library is unavailable.');
+  return enqueueSongLibraryOperation(() => _songLibrary.instantiate(id));
+});
+
+ipcMain.handle('song-library:remove', async (event, id) => {
+  assertOperatorSender(event);
+  if (!_songLibrary) throw new Error('Song library is unavailable.');
+  const item = await enqueueSongLibraryOperation(() => _songLibrary.getItem(id));
+  const result = await dialog.showMessageBox(getDialogParent() || undefined, {
+    type: 'warning',
+    title: 'Delete Library Song',
+    message: `Delete “${item.title}” from the song library?`,
+    detail: 'Songs already added to a project will not be removed.',
+    buttons: ['Delete', 'Cancel'],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true
+  });
+  if (result.response !== 0) return { deleted: false };
+  await enqueueSongLibraryOperation(() => _songLibrary.remove(id));
+  return { deleted: true };
+});
+
+ipcMain.handle('session:reset', async (event) => {
+  assertOperatorSender(event);
+  activeSessionPath = null;
+  sessionAssetPaths = new Map();
+  projectDirty = false;
+  await clearRecoverySnapshot().catch((error) => logError('Failed to clear recovery snapshot after reset', error));
+  return true;
+});
+
+ipcMain.handle('pptx:read-slides', async (event, token) => {
+  assertOperatorSender(event);
+  if (!token || typeof token !== 'string') {
+    return [];
+  }
+  const filePath = consumeFileToken(event, token, new Set(['.pptx']));
+  const stat = await fs.stat(filePath);
+  if (!stat.isFile() || stat.size > MAX_PPTX_BYTES) {
+    throw new Error('PowerPoint file is too large or is not a regular file.');
+  }
+  const data = await fs.readFile(filePath);
+  const zip = await JSZip.loadAsync(data);
+  const entries = Object.keys(zip.files).map((entry) => ({
+    entry,
+    normalized: entry.replace(/\\/g, '/')
+  }));
+  let slidePaths = entries.filter(({ normalized }) => /ppt\/slides\/slide\d+\.xml$/i.test(normalized));
+  if (slidePaths.length === 0) {
+    slidePaths = entries.filter(
+      ({ normalized }) => /ppt\/slides\/[^/]+\.xml$/i.test(normalized) && !/ppt\/slides\/_rels\//i.test(normalized)
+    );
+  }
+  if (slidePaths.length > MAX_PPTX_SLIDES) {
+    throw new Error('PowerPoint file contains too many slides.');
+  }
+  slidePaths.sort((a, b) => {
+    const aMatch = a.normalized.match(/slide(\d+)\.xml$/i);
+    const bMatch = b.normalized.match(/slide(\d+)\.xml$/i);
+    const aIndex = aMatch ? Number(aMatch[1]) : 0;
+    const bIndex = bMatch ? Number(bMatch[1]) : 0;
+    return aIndex - bIndex;
+  });
+  const slides = [];
+  let totalXmlBytes = 0;
+  for (const slidePath of slidePaths) {
+    const slideFile = zip.file(slidePath.entry);
+    const declaredSize = Number(slideFile?._data?.uncompressedSize);
+    if (Number.isFinite(declaredSize) && declaredSize >= 0) {
+      totalXmlBytes += declaredSize;
+      if (totalXmlBytes > MAX_PPTX_XML_BYTES) {
+        throw new Error('PowerPoint slide content is too large.');
+      }
+    }
+    const xml = await slideFile.async('string');
+    if (!Number.isFinite(declaredSize)) {
+      totalXmlBytes += Buffer.byteLength(xml, 'utf8');
+    }
+    if (totalXmlBytes > MAX_PPTX_XML_BYTES) {
+      throw new Error('PowerPoint slide content is too large.');
+    }
+    slides.push(xml);
+  }
+  return slides;
+});
+
+ipcMain.handle('media:pick', async (event) => {
+  try {
+    assertOperatorSender(event);
     const result = await showOpenDialogSafe({
       title: 'Select Background Media',
       properties: ['openFile'],
@@ -1574,7 +2171,7 @@ ipcMain.handle('media:pick', async () => {
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
-    return result.filePaths[0];
+    return issueFileToken(event, result.filePaths[0]);
   } catch (error) {
     logError('Failed to open media picker', error);
     dialog.showErrorBox('Media Picker Error', String(error?.message || error));
@@ -1582,8 +2179,9 @@ ipcMain.handle('media:pick', async () => {
   }
 });
 
-ipcMain.handle('announcement:pick', async () => {
+ipcMain.handle('announcement:pick', async (event) => {
   try {
+    assertOperatorSender(event);
     const result = await showOpenDialogSafe({
       title: 'Select Announcement Image',
       properties: ['openFile'],
@@ -1594,7 +2192,7 @@ ipcMain.handle('announcement:pick', async () => {
     if (result.canceled || result.filePaths.length === 0) {
       return null;
     }
-    return result.filePaths[0];
+    return issueFileToken(event, result.filePaths[0]);
   } catch (error) {
     logError('Failed to open announcement picker', error);
     dialog.showErrorBox('Announcement Picker Error', String(error?.message || error));
@@ -1602,97 +2200,87 @@ ipcMain.handle('announcement:pick', async () => {
   }
 });
 
-ipcMain.handle('media:import', async (_event, projectFolder, sourcePath) => {
-  const mediaDir = path.join(projectFolder, 'media');
-  await ensureDir(mediaDir);
-  const ext = path.extname(sourcePath);
-  const base = path.basename(sourcePath, ext);
-  const fileName = uniqueFileName(mediaDir, base, ext);
-  const target = path.join(mediaDir, fileName);
-  await fs.copyFile(sourcePath, target);
-  return {
-    relativePath: path.posix.join('media', fileName),
-    absolutePath: target
-  };
-});
-
-ipcMain.handle('library:import', async (_event, payload) => {
-  const sourcePath = typeof payload === 'string' ? payload : payload && payload.sourcePath;
+ipcMain.handle('library:import', async (event, payload) => {
+  assertOperatorSender(event);
+  const token = typeof payload === 'string' ? payload : payload && payload.sourcePath;
   const scope = payload && typeof payload === 'object' ? payload.scope : null;
-  if (!sourcePath) {
+  if (!token) {
     return null;
   }
+  const sourcePath = consumeFileToken(event, token, new Set([...IMAGE_EXTS, ...VIDEO_EXTS]));
   const libraryDir = await ensureLibraryFolder();
   const ext = path.extname(sourcePath);
-  const base = path.basename(sourcePath, ext);
   const type = mediaTypeFromExt(ext);
   const subfolder = libraryFolderForScope(scope, type);
   const targetDir = path.join(libraryDir, subfolder);
   await ensureDir(targetDir);
-  const fileName = uniqueFileName(targetDir, base, ext);
+  const descriptor = await describeAsset(sourcePath, type);
+  const fileName = `${descriptor.id}${descriptor.extension}`;
   const target = path.join(targetDir, fileName);
-  await fs.copyFile(sourcePath, target);
+  if (!await statIfExists(target)) await fs.copyFile(sourcePath, target);
   const relative = path.relative(libraryDir, target).replace(/\\/g, '/');
   return {
-    relativePath: path.posix.join('library', relative),
-    absolutePath: target
+    relativePath: path.posix.join('library', relative)
   };
 });
 
-ipcMain.handle('content-pack:import', async (_event, options = {}) => {
+ipcMain.handle('content-pack:import', async (event) => {
   try {
-    let sourcePath = options && options.sourcePath ? options.sourcePath : null;
-    if (!sourcePath) {
-      const result = await showOpenDialogSafe({
-        title: 'Import Content Pack (Folder)',
-        properties: ['openDirectory']
-      });
-      if (result.canceled || result.filePaths.length === 0) {
-        return { canceled: true };
-      }
-      sourcePath = result.filePaths[0];
+    assertLibrarySender(event);
+    const result = await showOpenDialogSafe({
+      title: 'Import Content Pack (Folder)',
+      properties: ['openDirectory']
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { canceled: true };
     }
-    return await importContentPack(sourcePath);
+    return await importContentPack(result.filePaths[0]);
   } catch (error) {
     logError('Failed to import content pack', error);
     return { error: 'Failed to import content pack.' };
   }
 });
 
-ipcMain.handle('announcement:import', async (_event, sourcePath) => {
+ipcMain.handle('announcement:import', async (event, token) => {
+  assertOperatorSender(event);
+  const sourcePath = consumeFileToken(event, token, IMAGE_EXTS);
   const libraryDir = await ensureLibraryFolder();
-  const ext = path.extname(sourcePath);
-  const base = path.basename(sourcePath, ext);
   const targetDir = path.join(libraryDir, 'Announcements');
   await ensureDir(targetDir);
-  const fileName = uniqueFileName(targetDir, base, ext);
+  const descriptor = await describeAsset(sourcePath, 'image');
+  const fileName = `${descriptor.id}${descriptor.extension}`;
   const target = path.join(targetDir, fileName);
-  await fs.copyFile(sourcePath, target);
+  if (!await statIfExists(target)) await fs.copyFile(sourcePath, target);
   const relative = path.relative(libraryDir, target).replace(/\\/g, '/');
   return {
-    relativePath: path.posix.join('library', relative),
-    absolutePath: target
+    relativePath: path.posix.join('library', relative)
   };
 });
 
-ipcMain.handle('display:list', async () => {
+ipcMain.handle('display:list', async (event) => {
+  assertOperatorSender(event);
+  const operatorDisplay = getOperatorDisplay();
   return screen.getAllDisplays().map((display) => ({
     id: display.id,
     label: `${display.id} - ${display.bounds.width}x${display.bounds.height}`,
     bounds: display.bounds,
-    scaleFactor: display.scaleFactor
+    scaleFactor: display.scaleFactor,
+    isOperator: operatorDisplay?.id === display.id
   }));
 });
 
-ipcMain.on('program:show', (_event, displayId) => {
+ipcMain.on('program:show', (event, displayId) => {
+  assertOperatorSender(event);
   showProgramWindows(displayId);
 });
 
-ipcMain.on('program:hide', () => {
+ipcMain.on('program:hide', (event) => {
+  assertOperatorOrProgramSender(event);
   hideProgramWindows();
 });
 
-ipcMain.on('program:set-display', (_event, displayId) => {
+ipcMain.on('program:set-display', (event, displayId) => {
+  assertOperatorSender(event);
   const displays = screen.getAllDisplays();
   setProgramDisplayPreference(displayId, displays);
   if (programVisible) {
@@ -1700,7 +2288,8 @@ ipcMain.on('program:set-display', (_event, displayId) => {
   }
 });
 
-ipcMain.on('program:toggle-fullscreen', () => {
+ipcMain.on('program:toggle-fullscreen', (event) => {
+  assertOperatorSender(event);
   programWindows.forEach((window) => {
     if (window && !window.isDestroyed()) {
       window.setFullScreen(!window.isFullScreen());
@@ -1708,7 +2297,8 @@ ipcMain.on('program:toggle-fullscreen', () => {
   });
 });
 
-ipcMain.on('program:state', (_event, state) => {
+ipcMain.on('program:state', (event, state) => {
+  assertOperatorSender(event);
   programWindows.forEach((window) => {
     if (window && !window.isDestroyed()) {
       window.webContents.send('program:state', state);
@@ -1716,13 +2306,51 @@ ipcMain.on('program:state', (_event, state) => {
   });
 });
 
-ipcMain.on('program:event', (_event, payload) => {
+ipcMain.on('program:event', (event, payload) => {
+  assertProgramSender(event);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('program:event', payload);
   }
 });
 
-ipcMain.on('edit:command', (_event, command) => {
+ipcMain.handle('stage:get-config', async (event) => {
+  assertOperatorSender(event);
+  return { displayTarget: stageDisplayTarget, visible: stageVisible };
+});
+
+ipcMain.on('stage:show', (event, displayId) => {
+  assertOperatorSender(event);
+  const resolved = resolveStageDisplayId(displayId);
+  if (resolved == null) return;
+  stageDisplayTarget = String(resolved);
+  persistStageDisplayTarget(stageDisplayTarget).catch((error) => logError('Failed to save stage display target', error));
+  showStageWindow(stageDisplayTarget);
+});
+
+ipcMain.on('stage:hide', (event) => {
+  assertOperatorOrStageSender(event);
+  hideStageWindow();
+});
+
+ipcMain.on('stage:set-display', (event, displayId) => {
+  assertOperatorSender(event);
+  const resolved = resolveStageDisplayId(displayId);
+  if (resolved == null) return;
+  stageDisplayTarget = String(resolved);
+  persistStageDisplayTarget(stageDisplayTarget).catch((error) => logError('Failed to save stage display target', error));
+  if (stageVisible) showStageWindow(stageDisplayTarget);
+});
+
+ipcMain.on('stage:state', (event, state) => {
+  assertOperatorSender(event);
+  latestStageState = sanitizeStageState(state);
+  if (stageWindow && !stageWindow.isDestroyed() && !stageWindow.webContents.isLoading()) {
+    stageWindow.webContents.send('stage:state', latestStageState);
+  }
+});
+
+ipcMain.on('edit:command', (event, command) => {
+  assertOperatorSender(event);
   const allowed = new Set(['undo', 'redo', 'cut', 'copy', 'paste', 'selectAll']);
   if (!allowed.has(command)) {
     return;
@@ -1738,33 +2366,74 @@ ipcMain.on('edit:command', (_event, command) => {
   }
 });
 
-ipcMain.handle('library:list', async (_event, options = {}) => {
+ipcMain.handle('library:list', async (event, options = {}) => {
+  assertLibrarySender(event);
   return listLibraryItems(options);
 });
 
-ipcMain.on('library:open', (_event, options = {}) => {
+ipcMain.on('library:open', (event, options = {}) => {
+  assertOperatorSender(event);
   const scope = options.scope || 'background';
   createLibraryWindow(scope);
 });
 
-ipcMain.on('library:close', () => {
+ipcMain.on('library:close', (event) => {
+  assertLibrarySender(event);
   if (libraryWindow && !libraryWindow.isDestroyed()) {
     libraryWindow.close();
   }
 });
 
-ipcMain.on('library:select', (_event, payload) => {
+ipcMain.on('library:select', (event, payload) => {
+  assertLibrarySender(event);
   const sourcePath = payload && payload.sourcePath ? payload.sourcePath : payload;
   const scope = payload && payload.scope ? payload.scope : libraryWindowScope || 'background';
+  const relativePath = typeof sourcePath === 'string'
+    ? sanitizeRelativePath(sourcePath.replace(/^library[\\/]/, ''))
+    : '';
+  if (!relativePath || !['background', 'announcements', 'timer'].includes(scope)) return;
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('library:selected', { scope, sourcePath });
+    mainWindow.webContents.send('library:selected', { scope, sourcePath: `library/${relativePath}` });
   }
   if (libraryWindow && !libraryWindow.isDestroyed()) {
     libraryWindow.close();
   }
 });
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  _persistenceStores = createPersistenceStores(app.getPath('userData'));
+  try {
+    await _persistenceStores.initialize();
+    const preferences = await _persistenceStores.preferences.read();
+    stageDisplayTarget = preferences.stageDisplayTarget;
+    _songLibrary = createSongLibrary(_persistenceStores);
+    await refreshRecentSessions({ rebuildMenu: false });
+  } catch (error) {
+    logError('Failed to initialize local persistence stores', error);
+  }
+  protocol.handle('worship-media', async (request) => {
+    try {
+      const url = new URL(request.url);
+      const value = decodeURIComponent(url.pathname.replace(/^\//, ''));
+      let filePath = null;
+      if (url.hostname === 'asset' && /^[a-f0-9]{64}$/.test(value)) {
+        filePath = sessionAssetPaths.get(value) || null;
+      } else if (url.hostname === 'library') {
+        const relativePath = sanitizeRelativePath(value);
+        const extension = path.extname(relativePath).toLowerCase();
+        if (relativePath && (IMAGE_EXTS.has(extension) || VIDEO_EXTS.has(extension))) {
+          filePath = await resolveContainedFile(getLibraryFolder(), relativePath)
+            || await resolveContainedFile(getBundledLibraryFolder(), relativePath);
+        }
+      }
+      if (!filePath) return new Response('Not found', { status: 404 });
+      return net.fetch(pathToFileURL(filePath).toString());
+    } catch (error) {
+      return new Response('Invalid media URL', { status: 400 });
+    }
+  });
+  session.defaultSession.setPermissionCheckHandler(() => false);
+  session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => callback(false));
   createMainWindow();
   createAppMenu();
   initAutoUpdater();
